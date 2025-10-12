@@ -548,6 +548,7 @@ $pollTimer.add_Tick({
     }
 })
 
+
 function Start-BackupRun {
     $logTextBox.Clear()
     $openLogButton.Enabled = $false
