@@ -15,16 +15,70 @@
     the standard Windows shutdown procedure once the copy job succeeded.
 #>
 
-if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
-    Write-Warning "Restarting script in STA mode which is required for Windows Forms..."
-    $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
-        FileName = 'powershell.exe'
-        Arguments = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
-        UseShellExecute = $false
+$ErrorActionPreference = 'Stop'
+
+$script:LogRoot = Join-Path -Path ([Environment]::GetFolderPath('MyDocuments')) -ChildPath 'WinbackLogs'
+[System.IO.Directory]::CreateDirectory($script:LogRoot) | Out-Null
+$script:LauncherLogPath = Join-Path -Path $script:LogRoot -ChildPath 'launcher.log'
+
+function Write-LauncherLog {
+    param(
+        [Parameter(Mandatory)] [string] $Message
+    )
+
+    try {
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -LiteralPath $script:LauncherLogPath -Value "[$timestamp] $Message" -Encoding UTF8
     }
-    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    catch {
+        Write-Warning "Konnte Startprotokoll nicht schreiben: $($_.Exception.Message)"
+    }
+}
+
+Write-LauncherLog -Message 'Skriptstart'
+
+if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
+    Write-LauncherLog -Message 'Neustart mit STA-Anforderung'
+
+    try {
+        $powerShellPath = (Get-Command -Name 'powershell.exe' -ErrorAction Stop).Source
+        $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
+            FileName         = $powerShellPath
+            Arguments        = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
+            UseShellExecute  = $true
+            WorkingDirectory = Split-Path -Parent $PSCommandPath
+        }
+
+        $process = [System.Diagnostics.Process]::Start($psi)
+
+        if (-not $process) {
+            throw "Der Neustart des Skripts konnte nicht ausgelöst werden."
+        }
+    }
+    catch {
+        Write-LauncherLog -Message "Neustart fehlgeschlagen: $($_.Exception.Message)"
+
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            [System.Windows.Forms.MessageBox]::Show(
+                "Die Benutzeroberfläche konnte nicht gestartet werden. Bitte die Datei '$script:LauncherLogPath' prüfen.",
+                'Winback Sicherung',
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+        }
+        catch {
+            Write-Error "Die Benutzeroberfläche konnte nicht gestartet werden: $($_.Exception.Message)"
+            Start-Sleep -Seconds 8
+        }
+    }
+
     return
 }
+
+Write-LauncherLog -Message 'STA-Laufzeit aktiv'
+
+try {
 
 #region --- User configuration -------------------------------------------------
 # Path to the folder you want to back up.
@@ -48,7 +102,8 @@ $OddDayTargetConfig = @{
 $UseTimestampFolder = $false
 
 # Folder to store Robocopy logs. Will be created if it doesn't exist.
-$LogDirectory = "$env:USERPROFILE\\Documents\\WinbackLogs"
+$LogDirectory = $script:LogRoot
+
 #endregion ---------------------------------------------------------------------
 
 function Ensure-Directory {
@@ -59,6 +114,56 @@ function Ensure-Directory {
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
+}
+
+function Get-FriendlyErrorMessage {
+    param(
+        [Parameter()] [object] $ErrorObject,
+        [string] $Fallback = 'Es ist ein unbekannter Fehler aufgetreten.'
+    )
+
+    $message = $null
+
+    if ($ErrorObject -is [System.Management.Automation.ErrorRecord]) {
+        $message = $ErrorObject.Exception.Message
+
+        if ([string]::IsNullOrWhiteSpace($message) -and $ErrorObject.Exception -and $ErrorObject.Exception.InnerException) {
+            $message = $ErrorObject.Exception.InnerException.Message
+        }
+
+        if ([string]::IsNullOrWhiteSpace($message) -and $ErrorObject.FullyQualifiedErrorId) {
+            $message = $ErrorObject.FullyQualifiedErrorId
+        }
+    }
+    elseif ($ErrorObject -is [System.Exception]) {
+        $message = $ErrorObject.Message
+
+        if ([string]::IsNullOrWhiteSpace($message) -and $ErrorObject.InnerException) {
+            $message = $ErrorObject.InnerException.Message
+        }
+    }
+    elseif ($ErrorObject) {
+        $message = $ErrorObject.ToString()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = $Fallback
+    }
+
+    return $message.Trim()
+}
+
+function Show-UiError {
+    param(
+        [Parameter()] [object] $ErrorObject,
+        [string] $Fallback = 'Es ist ein unbekannter Fehler aufgetreten.',
+        [string] $Title = 'Backup-Fehler'
+    )
+
+    $message = Get-FriendlyErrorMessage -ErrorObject $ErrorObject -Fallback $Fallback
+    Show-ErrorDialog -Message $message -Title $Title
+
+    return $message
 }
 
 function Get-ConfigDescription {
@@ -253,73 +358,217 @@ function Show-ErrorDialog {
     [System.Windows.Forms.MessageBox]::Show($Message, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
 }
 
+$accentColor   = [System.Drawing.ColorTranslator]::FromHtml('#2563EB')
+$successColor  = [System.Drawing.ColorTranslator]::FromHtml('#047857')
+$errorColor    = [System.Drawing.ColorTranslator]::FromHtml('#B91C1C')
+$neutralColor  = [System.Drawing.ColorTranslator]::FromHtml('#1F2933')
+$surfaceColor  = [System.Drawing.Color]::White
+$backgroundCol = [System.Drawing.ColorTranslator]::FromHtml('#F5F7FB')
+
 $form = New-Object System.Windows.Forms.Form -Property @{
     Text            = 'Winback Sicherung'
-    Size            = New-Object System.Drawing.Size(520, 420)
+    Size            = New-Object System.Drawing.Size(580, 520)
+    MinimumSize     = New-Object System.Drawing.Size(560, 480)
     FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     MaximizeBox     = $false
     StartPosition   = 'CenterScreen'
+    BackColor       = $backgroundCol
 }
+$form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+$tableLayout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{
+    Dock        = 'Fill'
+    ColumnCount = 1
+    RowCount    = 4
+    BackColor   = $backgroundCol
+    Padding     = New-Object System.Windows.Forms.Padding(14)
+}
+$tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$form.Controls.Add($tableLayout)
 
 $evenDescription = Get-ConfigDescription -Config $EvenDayTargetConfig
 $oddDescription  = Get-ConfigDescription -Config $OddDayTargetConfig
 
-$infoLabel = New-Object System.Windows.Forms.Label -Property @{
-    AutoSize = $false
-    Location = New-Object System.Drawing.Point(10, 10)
-    Size     = New-Object System.Drawing.Size(480, 70)
-    Text     = "Quelle: $SourcePath`r`nGerade Tage: $evenDescription`r`nUngerade Tage: $oddDescription"
+$headerPanel = New-Object System.Windows.Forms.Panel -Property @{
+    BackColor = $surfaceColor
+    AutoSize  = $true
+    Dock      = 'Top'
+    Padding   = New-Object System.Windows.Forms.Padding(16)
+    Margin    = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
 }
-$form.Controls.Add($infoLabel)
+
+$headerTitle = New-Object System.Windows.Forms.Label -Property @{
+    Text      = 'Konfiguration'
+    Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 12)
+    ForeColor = $accentColor
+    AutoSize  = $true
+    Dock      = 'Top'
+}
+$headerPanel.Controls.Add($headerTitle)
+
+$infoLabel = New-Object System.Windows.Forms.Label -Property @{
+    AutoSize     = $true
+    Dock         = 'Top'
+    MaximumSize  = New-Object System.Drawing.Size(520, 0)
+    Padding      = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
+    Text         = "Quelle: $SourcePath`r`nGerade Tage: $evenDescription`r`nUngerade Tage: $oddDescription"
+    ForeColor    = $neutralColor
+}
+$headerPanel.Controls.Add($infoLabel)
+$tableLayout.Controls.Add($headerPanel, 0, 0)
+
+$statusPanel = New-Object System.Windows.Forms.Panel -Property @{
+    BackColor = $surfaceColor
+    AutoSize  = $true
+    Dock      = 'Top'
+    Padding   = New-Object System.Windows.Forms.Padding(16, 12, 16, 12)
+    Margin    = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
+}
+
+$statusCaption = New-Object System.Windows.Forms.Label -Property @{
+    Text     = 'Status'
+    AutoSize = $true
+    Font     = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
+    ForeColor = $accentColor
+    Dock     = 'Top'
+}
+$statusPanel.Controls.Add($statusCaption)
 
 $statusLabel = New-Object System.Windows.Forms.Label -Property @{
-    AutoSize = $false
-    Location = New-Object System.Drawing.Point(10, 90)
-    Size     = New-Object System.Drawing.Size(480, 40)
-    Font     = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-    Text     = 'Bereit für Sicherung.'
+    AutoSize  = $true
+    Dock      = 'Top'
+    Font      = New-Object System.Drawing.Font('Segoe UI', 10)
+    ForeColor = $neutralColor
+    Padding   = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
+    Text      = 'Bereit für Sicherung.'
 }
-$form.Controls.Add($statusLabel)
+$statusPanel.Controls.Add($statusLabel)
+
+$progressBar = New-Object System.Windows.Forms.ProgressBar -Property @{
+    Style                 = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    MarqueeAnimationSpeed = 28
+    Visible               = $false
+    Dock                  = 'Top'
+}
+$progressBar.Height = 18
+$progressBar.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+$statusPanel.Controls.Add($progressBar)
+
+$tableLayout.Controls.Add($statusPanel, 0, 1)
+
+$logGroup = New-Object System.Windows.Forms.GroupBox -Property @{
+    Text     = 'Protokollauszug'
+    Dock     = 'Fill'
+    Padding  = New-Object System.Windows.Forms.Padding(16, 26, 16, 16)
+    BackColor = $surfaceColor
+    ForeColor = $neutralColor
+}
 
 $logTextBox = New-Object System.Windows.Forms.TextBox -Property @{
-    Multiline       = $true
-    ScrollBars      = 'Vertical'
-    ReadOnly        = $true
-    Location        = New-Object System.Drawing.Point(10, 135)
-    Size            = New-Object System.Drawing.Size(480, 190)
-    Font            = New-Object System.Drawing.Font('Consolas', 9)
-    BackColor       = [System.Drawing.Color]::White
+    Multiline  = $true
+    ScrollBars = 'Vertical'
+    ReadOnly   = $true
+    Dock       = 'Fill'
+    Font       = New-Object System.Drawing.Font('Consolas', 9)
+    BackColor  = [System.Drawing.Color]::White
+    BorderStyle = [System.Windows.Forms.BorderStyle]::None
 }
-$form.Controls.Add($logTextBox)
+$logTextBox.Margin = New-Object System.Windows.Forms.Padding(0)
+$logGroup.Controls.Add($logTextBox)
+$tableLayout.Controls.Add($logGroup, 0, 2)
+
+$footerLayout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{
+    ColumnCount = 2
+    AutoSize    = $true
+    Dock        = 'Top'
+    Margin      = New-Object System.Windows.Forms.Padding(0, 12, 0, 0)
+    BackColor   = [System.Drawing.Color]::Transparent
+}
+$footerLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$footerLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
 
 $shutdownCheckbox = New-Object System.Windows.Forms.CheckBox -Property @{
-    Location = New-Object System.Drawing.Point(10, 335)
-    Size     = New-Object System.Drawing.Size(320, 25)
+    AutoSize = $true
     Text     = 'Nach erfolgreichem Backup herunterfahren'
+    ForeColor = $neutralColor
+    Dock     = 'Left'
 }
-$form.Controls.Add($shutdownCheckbox)
+$footerLayout.Controls.Add($shutdownCheckbox, 0, 0)
+
+$buttonFlow = New-Object System.Windows.Forms.FlowLayoutPanel -Property @{
+    FlowDirection = [System.Windows.Forms.FlowDirection]::RightToLeft
+    AutoSize      = $true
+    Dock          = 'Fill'
+    WrapContents  = $false
+    BackColor     = [System.Drawing.Color]::Transparent
+}
 
 $startButton = New-Object System.Windows.Forms.Button -Property @{
-    Text     = 'Backup starten'
-    Location = New-Object System.Drawing.Point(10, 365)
-    Size     = New-Object System.Drawing.Size(150, 30)
+    Text                   = 'Backup starten'
+    AutoSize               = $true
+    Padding                = New-Object System.Windows.Forms.Padding(16, 6, 16, 6)
+    BackColor              = $accentColor
+    ForeColor              = [System.Drawing.Color]::White
+    FlatStyle              = [System.Windows.Forms.FlatStyle]::Flat
+    UseVisualStyleBackColor = $false
 }
-$form.Controls.Add($startButton)
+$startButton.FlatAppearance.BorderSize = 0
+$startButton.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
 
 $openLogButton = New-Object System.Windows.Forms.Button -Property @{
-    Text     = 'Logdatei öffnen'
-    Location = New-Object System.Drawing.Point(170, 365)
-    Size     = New-Object System.Drawing.Size(150, 30)
-    Enabled  = $false
+    Text                   = 'Logdatei öffnen'
+    AutoSize               = $true
+    Padding                = New-Object System.Windows.Forms.Padding(16, 6, 16, 6)
+    Enabled                = $false
+    BackColor              = [System.Drawing.ColorTranslator]::FromHtml('#E5E7EB')
+    ForeColor              = $neutralColor
+    FlatStyle              = [System.Windows.Forms.FlatStyle]::Flat
+    UseVisualStyleBackColor = $false
 }
-$form.Controls.Add($openLogButton)
+$openLogButton.FlatAppearance.BorderSize = 0
+$openLogButton.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
 
 $closeButton = New-Object System.Windows.Forms.Button -Property @{
-    Text     = 'Schließen'
-    Location = New-Object System.Drawing.Point(340, 365)
-    Size     = New-Object System.Drawing.Size(150, 30)
+    Text                   = 'Schließen'
+    AutoSize               = $true
+    Padding                = New-Object System.Windows.Forms.Padding(16, 6, 16, 6)
+    BackColor              = [System.Drawing.ColorTranslator]::FromHtml('#F3F4F6')
+    ForeColor              = $neutralColor
+    FlatStyle              = [System.Windows.Forms.FlatStyle]::Flat
+    UseVisualStyleBackColor = $false
 }
-$form.Controls.Add($closeButton)
+$closeButton.FlatAppearance.BorderSize = 0
+$closeButton.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
+
+$buttonFlow.Controls.Add($startButton)
+$buttonFlow.Controls.Add($openLogButton)
+$buttonFlow.Controls.Add($closeButton)
+
+$footerLayout.Controls.Add($buttonFlow, 1, 0)
+$tableLayout.Controls.Add($footerLayout, 0, 3)
+
+$form.AcceptButton = $startButton
+$form.CancelButton = $closeButton
+
+$script:defaultStatusColor = $neutralColor
+
+function Set-Status {
+    param(
+        [Parameter(Mandatory)] [string] $Text,
+        [System.Drawing.Color] $Color = $script:defaultStatusColor,
+        [bool] $IsRunning = $false
+    )
+
+    $statusLabel.Text = $Text
+    $statusLabel.ForeColor = $Color
+    $progressBar.Visible = $IsRunning
+}
+
+Set-Status -Text 'Bereit für Sicherung.' -Color $neutralColor -IsRunning:$false
+
 
 $backgroundWorker = New-Object System.ComponentModel.BackgroundWorker
 $backgroundWorker.WorkerSupportsCancellation = $false
@@ -329,9 +578,11 @@ $script:currentLogFile = $null
 function Start-BackupRun {
     $logTextBox.Clear()
     $openLogButton.Enabled = $false
-    $statusLabel.ForeColor = [System.Drawing.Color]::FromKnownColor('ControlText')
 
     try {
+        Set-Status -Text 'Prüfe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
+
+
         if (-not (Test-Path -LiteralPath $SourcePath)) {
             throw "Der Quellordner '$SourcePath' wurde nicht gefunden. Bitte Konfiguration prüfen."
         }
@@ -343,13 +594,18 @@ function Start-BackupRun {
             throw "Das Laufwerk für $($targetInfo.RoleDescription) Tage ist nicht erreichbar. Bitte die passende USB-Festplatte anschließen."
         }
 
-        $targetRoot = $targetInfo.DestinationPath
+        $targetRoot  = $targetInfo.DestinationPath
         $logFileName = "backup-" + $today.ToString('yyyy-MM-dd_HHmmss') + '.log'
         $logFile     = Join-Path -Path $LogDirectory -ChildPath $logFileName
 
-        $statusLabel.Text = "Sicherung läuft auf $targetRoot ..."
+        $logTextBox.AppendText("Ziel ($($targetInfo.RoleDescription) Tage): $targetRoot`r`n")
+        $logTextBox.AppendText("Robocopy-Protokoll: $logFile`r`n`r`n")
+
         $startButton.Enabled = $false
         $closeButton.Enabled = $false
+
+        Write-LauncherLog -Message "Sicherung gestartet ($($targetInfo.RoleDescription) Tage) → $targetRoot"
+        Set-Status -Text "Sicherung läuft auf $targetRoot ..." -Color $accentColor -IsRunning $true
 
         $args = @{
             Source      = $SourcePath
@@ -362,11 +618,12 @@ function Start-BackupRun {
         $script:currentLogFile = $logFile
     }
     catch {
-        $statusLabel.Text = 'Fehler beim Start.'
-        $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
-        Show-ErrorDialog -Message $_.Exception.Message
         $startButton.Enabled = $true
         $closeButton.Enabled = $true
+
+        $message = Show-UiError -ErrorObject $_ -Fallback 'Die Sicherung konnte nicht gestartet werden.'
+        Set-Status -Text 'Fehler beim Start.' -Color $errorColor -IsRunning:$false
+        Write-LauncherLog -Message "Start fehlgeschlagen: $message"
     }
 }
 
@@ -389,25 +646,29 @@ $backgroundWorker.Add_RunWorkerCompleted({
     $closeButton.Enabled = $true
 
     if ($e.Error) {
-        $statusLabel.Text = 'Backup fehlgeschlagen.'
-        $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
-        Show-ErrorDialog -Message $e.Error.Exception.Message
-        return
+        $message = Show-UiError -ErrorObject $e.Error -Fallback 'Die Sicherung wurde mit einem unerwarteten Fehler abgebrochen.'
+        Set-Status -Text 'Backup fehlgeschlagen.' -Color $errorColor -IsRunning:$false
+        $logTextBox.AppendText("Fehler: $message`r`n")
+        Write-LauncherLog -Message "Sicherung fehlgeschlagen: $message"
+
+  return
     }
 
     $result = $e.Result
     $logTextBox.AppendText("Logdatei: $($result.LogPath)`r`n")
 
     if ($result.ExitCode -gt 7) {
-        $statusLabel.Text = 'Backup mit Fehler beendet. Log prüfen.'
-        $statusLabel.ForeColor = [System.Drawing.Color]::DarkRed
-        Show-ErrorDialog -Message "Robocopy meldet Fehler (Code $($result.ExitCode)). Bitte Log ansehen."
+        Set-Status -Text 'Backup mit Fehler beendet. Log prüfen.' -Color $errorColor -IsRunning:$false
+        $errorMessage = "Robocopy meldet Fehler (Code $($result.ExitCode)). Bitte Log ansehen."
+        Show-ErrorDialog -Message $errorMessage
+        $logTextBox.AppendText($errorMessage + "`r`n")
         $openLogButton.Enabled = $true
+        Write-LauncherLog -Message "Sicherung mit Fehlercode $($result.ExitCode) beendet."
         return
     }
 
-    $statusLabel.Text = "Backup erfolgreich: $($result.Target)"
-    $statusLabel.ForeColor = [System.Drawing.Color]::DarkGreen
+    Set-Status -Text "Backup erfolgreich: $($result.Target)" -Color $successColor -IsRunning:$false
+
     $openLogButton.Enabled = $true
 
     try {
@@ -416,16 +677,23 @@ $backgroundWorker.Add_RunWorkerCompleted({
         $logTextBox.AppendText(($recentLines -join [Environment]::NewLine) + [Environment]::NewLine)
     }
     catch {
-        $logTextBox.AppendText("Log konnte nicht geladen werden: $($_.Exception.Message)`r`n")
+        $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Log konnte nicht geladen werden.'
+        $logTextBox.AppendText("$message`r`n")
+        Write-LauncherLog -Message "Lesen des Logs fehlgeschlagen: $message"
     }
 
+    Write-LauncherLog -Message "Sicherung erfolgreich abgeschlossen (Code $($result.ExitCode))."
+
     if ($shutdownCheckbox.Checked) {
-        $statusLabel.Text += ' | Herunterfahren wird gestartet.'
+        Set-Status -Text ($statusLabel.Text + ' | Herunterfahren wird gestartet.') -Color $successColor -IsRunning:$false
+
         try {
             Start-Process -FilePath 'shutdown.exe' -ArgumentList '/s','/t','0'
         }
         catch {
-            Show-ErrorDialog -Message "Herunterfahren konnte nicht gestartet werden: $($_.Exception.Message)"
+            $message = Show-UiError -ErrorObject $_ -Fallback 'Herunterfahren konnte nicht gestartet werden.' -Title 'Herunterfahren fehlgeschlagen'
+            Write-LauncherLog -Message "Herunterfahren fehlgeschlagen: $message"
+
         }
     }
 })
@@ -440,4 +708,24 @@ $openLogButton.Add_Click({
 
 $closeButton.Add_Click({ $form.Close() })
 
+Write-LauncherLog -Message 'Benutzeroberfläche wird angezeigt'
 [void]$form.ShowDialog()
+Write-LauncherLog -Message 'Benutzeroberfläche geschlossen'
+}
+catch {
+    Write-LauncherLog -Message ("Unbehandelter Fehler: " + $_.Exception.Message)
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        [System.Windows.Forms.MessageBox]::Show(
+            "Es ist ein unerwarteter Fehler aufgetreten: $($_.Exception.Message)`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
+            'Winback Sicherung',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+    catch {
+        Write-Error "Unerwarteter Fehler: $($_.Exception.Message)"
+        Start-Sleep -Seconds 8
+    }
+}
