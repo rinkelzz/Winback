@@ -103,6 +103,7 @@ $UseTimestampFolder = $false
 
 # Folder to store Robocopy logs. Will be created if it doesn't exist.
 $LogDirectory = $script:LogRoot
+
 #endregion ---------------------------------------------------------------------
 
 function Ensure-Directory {
@@ -568,6 +569,7 @@ function Set-Status {
 
 Set-Status -Text 'Bereit für Sicherung.' -Color $neutralColor -IsRunning:$false
 
+
 $backgroundWorker = New-Object System.ComponentModel.BackgroundWorker
 $backgroundWorker.WorkerSupportsCancellation = $false
 
@@ -579,6 +581,7 @@ function Start-BackupRun {
 
     try {
         Set-Status -Text 'Prüfe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
+
 
         if (-not (Test-Path -LiteralPath $SourcePath)) {
             throw "Der Quellordner '$SourcePath' wurde nicht gefunden. Bitte Konfiguration prüfen."
@@ -647,7 +650,8 @@ $backgroundWorker.Add_RunWorkerCompleted({
         Set-Status -Text 'Backup fehlgeschlagen.' -Color $errorColor -IsRunning:$false
         $logTextBox.AppendText("Fehler: $message`r`n")
         Write-LauncherLog -Message "Sicherung fehlgeschlagen: $message"
-        return
+
+  return
     }
 
     $result = $e.Result
@@ -664,6 +668,7 @@ $backgroundWorker.Add_RunWorkerCompleted({
     }
 
     Set-Status -Text "Backup erfolgreich: $($result.Target)" -Color $successColor -IsRunning:$false
+
     $openLogButton.Enabled = $true
 
     try {
@@ -681,12 +686,14 @@ $backgroundWorker.Add_RunWorkerCompleted({
 
     if ($shutdownCheckbox.Checked) {
         Set-Status -Text ($statusLabel.Text + ' | Herunterfahren wird gestartet.') -Color $successColor -IsRunning:$false
+
         try {
             Start-Process -FilePath 'shutdown.exe' -ArgumentList '/s','/t','0'
         }
         catch {
             $message = Show-UiError -ErrorObject $_ -Fallback 'Herunterfahren konnte nicht gestartet werden.' -Title 'Herunterfahren fehlgeschlagen'
             Write-LauncherLog -Message "Herunterfahren fehlgeschlagen: $message"
+
         }
     }
 })
