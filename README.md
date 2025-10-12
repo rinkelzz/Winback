@@ -31,7 +31,7 @@ $OddDayTargetConfig = @{
 
 ## Verwendung
 
-1. Verbinden Sie beide USB-Festplatten mit dem PC.
+1. Verbinden Sie mindestens die USB-Festplatte, die dem aktuellen Kalendertag zugeordnet ist. Ist nur eine der beiden angeschlossen, startet die Sicherung trotzdem – das Skript überprüft anhand des eingestellten Datenträgers (Volume-Label/Laufwerksbuchstabe), ob wirklich das richtige Ziel gefunden wurde.
 2. Klicken Sie mit der rechten Maustaste auf die Datei `odd-even-backup.ps1` und wählen Sie **Mit PowerShell ausführen**. Das Skript startet automatisch im benötigten STA-Modus.
 3. Die Oberfläche zeigt Quelle, tagesabhängiges Ziel und einen farblich hervorgehobenen Statusbereich an. Starten Sie die Sicherung über **Backup starten** – während des Kopiervorgangs läuft ein dezenter Fortschrittsbalken, und im Protokollauszug erscheinen der Logpfad sowie die letzten Zeilen der Robocopy-Datei.
 4. Aktivieren Sie optional die Checkbox **Nach erfolgreichem Backup herunterfahren**, um den PC direkt nach erfolgreichem Kopiervorgang herunterzufahren.
@@ -54,7 +54,8 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 ## Weitere Hinweise
 
 - Das Skript verwendet `robocopy`, das standardmäßig unter Windows 11 vorhanden ist.
-- Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Das Startprotokoll hält jetzt auch fest, ob eine Sicherung erfolgreich beendet oder mit einem Fehler abgebrochen wurde.
+- Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Das Startprotokoll dokumentiert Startzeit, Abschluss (inklusive Robocopy-Code) und mögliche Fehler.
 - Wenn sich die PowerShell direkt wieder schließt, öffnen Sie `launcher.log`, um die Ursache zu sehen (z. B. fehlende USB-Festplatte oder blockierte Datei). Bei blockierten Dateien hilft `Unblock-File -Path .\odd-even-backup.ps1` in einer administrativen PowerShell.
 - Der Statusbereich und zusätzliche Hinweisdialoge geben klare Fehlermeldungen aus, z. B. wenn ein Laufwerk nicht gefunden wird oder Robocopy mit einem Fehlercode stoppt.
+- Während des Kopiervorgangs bleibt die Oberfläche aktiv und verhindert ein versehentliches Schließen. Nach Abschluss wird der Startknopf wieder freigegeben und Sie können die Logdatei direkt öffnen.
 - Prüfen Sie regelmäßig die Log-Dateien, um sicherzustellen, dass die Sicherung erfolgreich war.

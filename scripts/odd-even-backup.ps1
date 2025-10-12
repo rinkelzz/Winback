@@ -103,7 +103,6 @@ $UseTimestampFolder = $false
 
 # Folder to store Robocopy logs. Will be created if it doesn't exist.
 $LogDirectory = $script:LogRoot
-
 #endregion ---------------------------------------------------------------------
 
 function Ensure-Directory {
@@ -313,37 +312,6 @@ function Get-TargetInfo {
         BasePath        = $resolved.BasePath
         DestinationPath = $destination
     }
-}
-
-function Invoke-Backup {
-    param(
-        [Parameter(Mandatory)] [string] $Source,
-        [Parameter(Mandatory)] [string] $Destination,
-        [Parameter(Mandatory)] [string] $LogPath
-    )
-
-    Ensure-Directory -Path (Split-Path -Parent $LogPath)
-    Ensure-Directory -Path $Destination
-
-    $robocopyArgs = @(
-        '"' + $Source + '"',
-        '"' + $Destination + '"',
-        '/MIR',          # Mirror source to destination (adds/removes files as needed)
-        '/R:3',          # Retry up to 3 times on failure
-        '/W:5',          # Wait 5 seconds between retries
-        '/MT:16',        # Use multithreading for speed
-        '/COPY:DAT',     # Copy data, attributes, timestamps
-        '/DCOPY:T',      # Copy directory timestamps
-        '/V',            # Produce verbose output
-        '/NP',           # Do not display progress percentage (cleaner log)
-        '/LOG:"' + $LogPath + '"'
-    )
-
-    $robocopyCommand = "robocopy " + ($robocopyArgs -join ' ')
-    Write-Host "Running: $robocopyCommand" -ForegroundColor Cyan
-
-    $process = Start-Process -FilePath 'robocopy.exe' -ArgumentList $robocopyArgs -NoNewWindow -Wait -PassThru
-    return $process.ExitCode
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -569,19 +537,29 @@ function Set-Status {
 
 Set-Status -Text 'Bereit für Sicherung.' -Color $neutralColor -IsRunning:$false
 
-
-$backgroundWorker = New-Object System.ComponentModel.BackgroundWorker
-$backgroundWorker.WorkerSupportsCancellation = $false
-
 $script:currentLogFile = $null
+$script:activeBackup   = $null
+
+$pollTimer = New-Object System.Windows.Forms.Timer -Property @{ Interval = 750 }
+$pollTimer.add_Tick({
+    if ($script:activeBackup -and $script:activeBackup.Process -and $script:activeBackup.Process.HasExited) {
+        $pollTimer.Stop()
+        Complete-Backup
+    }
+})
+
 
 function Start-BackupRun {
     $logTextBox.Clear()
     $openLogButton.Enabled = $false
 
     try {
-        Set-Status -Text 'Prüfe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
+        if ($script:activeBackup) {
+            Write-LauncherLog -Message 'Sicherung bereits aktiv, Start ignoriert.'
+            return
+        }
 
+        Set-Status -Text 'Prüfe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
 
         if (-not (Test-Path -LiteralPath $SourcePath)) {
             throw "Der Quellordner '$SourcePath' wurde nicht gefunden. Bitte Konfiguration prüfen."
@@ -607,17 +585,49 @@ function Start-BackupRun {
         Write-LauncherLog -Message "Sicherung gestartet ($($targetInfo.RoleDescription) Tage) → $targetRoot"
         Set-Status -Text "Sicherung läuft auf $targetRoot ..." -Color $accentColor -IsRunning $true
 
-        $args = @{
-            Source      = $SourcePath
-            Destination = $targetRoot
-            LogPath     = $logFile
-            Role        = $targetInfo.RoleDescription
+        Ensure-Directory -Path (Split-Path -Parent $logFile)
+        Ensure-Directory -Path $targetRoot
+
+        $robocopyArgs = @(
+            '"' + $SourcePath + '"',
+            '"' + $targetRoot + '"',
+            '/MIR',
+            '/R:3',
+            '/W:5',
+            '/MT:16',
+            '/COPY:DAT',
+            '/DCOPY:T',
+            '/V',
+            '/NP',
+            '/LOG:"' + $logFile + '"'
+        )
+
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = 'robocopy.exe'
+        $startInfo.Arguments = $robocopyArgs -join ' '
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+
+        if (-not $process.Start()) {
+            throw 'Robocopy konnte nicht gestartet werden.'
         }
 
-        $backgroundWorker.RunWorkerAsync($args)
+        $script:activeBackup = [PSCustomObject]@{
+            Process = $process
+            LogPath = $logFile
+            Target  = $targetRoot
+            Role    = $targetInfo.RoleDescription
+        }
+
+        $pollTimer.Start()
         $script:currentLogFile = $logFile
     }
     catch {
+        $pollTimer.Stop()
+        $script:activeBackup = $null
         $startButton.Enabled = $true
         $closeButton.Enabled = $true
 
@@ -627,52 +637,63 @@ function Start-BackupRun {
     }
 }
 
-$backgroundWorker.Add_DoWork({
-    param($sender, $e)
-
-    $arg = $e.Argument
-    $e.Result = [PSCustomObject]@{
-        ExitCode = Invoke-Backup -Source $arg.Source -Destination $arg.Destination -LogPath $arg.LogPath
-        LogPath  = $arg.LogPath
-        Target   = $arg.Destination
-        Role     = $arg.Role
+function Complete-Backup {
+    if (-not $script:activeBackup) {
+        return
     }
-})
 
-$backgroundWorker.Add_RunWorkerCompleted({
-    param($sender, $e)
+    $pollTimer.Stop()
+
+    $process = $script:activeBackup.Process
+
+    try {
+        $process.WaitForExit()
+    }
+    catch {
+        Write-LauncherLog -Message "Warten auf Robocopy fehlgeschlagen: $($_.Exception.Message)"
+    }
+
+    $exitCode = $null
+    try {
+        $exitCode = $process.ExitCode
+    }
+    catch {
+        $exitCode = 16
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    $result = $script:activeBackup
+    $script:activeBackup = $null
 
     $startButton.Enabled = $true
     $closeButton.Enabled = $true
 
-    if ($e.Error) {
-        $message = Show-UiError -ErrorObject $e.Error -Fallback 'Die Sicherung wurde mit einem unerwarteten Fehler abgebrochen.'
-        Set-Status -Text 'Backup fehlgeschlagen.' -Color $errorColor -IsRunning:$false
-        $logTextBox.AppendText("Fehler: $message`r`n")
-        Write-LauncherLog -Message "Sicherung fehlgeschlagen: $message"
+    $logPath = $result.LogPath
+    $target  = $result.Target
 
-  return
-    }
+    $script:currentLogFile = $logPath
+    $logTextBox.AppendText("Logdatei: $logPath`r`n")
 
-    $result = $e.Result
-    $logTextBox.AppendText("Logdatei: $($result.LogPath)`r`n")
-
-    if ($result.ExitCode -gt 7) {
+    if ($exitCode -gt 7) {
         Set-Status -Text 'Backup mit Fehler beendet. Log prüfen.' -Color $errorColor -IsRunning:$false
-        $errorMessage = "Robocopy meldet Fehler (Code $($result.ExitCode)). Bitte Log ansehen."
+        $errorMessage = "Robocopy meldet Fehler (Code $exitCode). Bitte Log ansehen."
         Show-ErrorDialog -Message $errorMessage
         $logTextBox.AppendText($errorMessage + "`r`n")
         $openLogButton.Enabled = $true
-        Write-LauncherLog -Message "Sicherung mit Fehlercode $($result.ExitCode) beendet."
+        $role = $result.Role
+        Write-LauncherLog -Message "Sicherung ($role) mit Fehlercode $exitCode beendet."
         return
     }
 
-    Set-Status -Text "Backup erfolgreich: $($result.Target)" -Color $successColor -IsRunning:$false
+    $role = $result.Role
 
+    Set-Status -Text "Backup erfolgreich: $target" -Color $successColor -IsRunning:$false
     $openLogButton.Enabled = $true
 
     try {
-        $logContent = Get-Content -LiteralPath $result.LogPath -ErrorAction Stop
+        $logContent = Get-Content -LiteralPath $logPath -ErrorAction Stop
         $recentLines = $logContent | Select-Object -Last 200
         $logTextBox.AppendText(($recentLines -join [Environment]::NewLine) + [Environment]::NewLine)
     }
@@ -682,21 +703,19 @@ $backgroundWorker.Add_RunWorkerCompleted({
         Write-LauncherLog -Message "Lesen des Logs fehlgeschlagen: $message"
     }
 
-    Write-LauncherLog -Message "Sicherung erfolgreich abgeschlossen (Code $($result.ExitCode))."
+    Write-LauncherLog -Message "Sicherung ($role) erfolgreich abgeschlossen (Code $exitCode)."
 
     if ($shutdownCheckbox.Checked) {
         Set-Status -Text ($statusLabel.Text + ' | Herunterfahren wird gestartet.') -Color $successColor -IsRunning:$false
-
         try {
             Start-Process -FilePath 'shutdown.exe' -ArgumentList '/s','/t','0'
         }
         catch {
             $message = Show-UiError -ErrorObject $_ -Fallback 'Herunterfahren konnte nicht gestartet werden.' -Title 'Herunterfahren fehlgeschlagen'
             Write-LauncherLog -Message "Herunterfahren fehlgeschlagen: $message"
-
         }
     }
-})
+}
 
 $startButton.Add_Click({ Start-BackupRun })
 
@@ -707,6 +726,20 @@ $openLogButton.Add_Click({
 })
 
 $closeButton.Add_Click({ $form.Close() })
+
+$form.Add_FormClosing({
+    param($sender, $e)
+
+    if ($script:activeBackup) {
+        $e.Cancel = $true
+        [System.Windows.Forms.MessageBox]::Show(
+            'Die Sicherung läuft noch. Bitte warten Sie, bis der Vorgang abgeschlossen ist.',
+            'Winback Sicherung',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+    }
+})
 
 Write-LauncherLog -Message 'Benutzeroberfläche wird angezeigt'
 [void]$form.ShowDialog()
