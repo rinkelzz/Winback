@@ -37,6 +37,9 @@ function Write-LauncherLog {
 
 Write-LauncherLog -Message 'Skriptstart'
 
+$script:ApplicationTitleBase = 'Backup by RinkelTech'
+$script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
+
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
     Write-LauncherLog -Message 'Neustart mit STA-Anforderung'
 
@@ -52,7 +55,7 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threadin
         $process = [System.Diagnostics.Process]::Start($psi)
 
         if (-not $process) {
-            throw "Der Neustart des Skripts konnte nicht ausgelöst werden."
+            throw "Der Neustart des Skripts konnte nicht ausgeloest werden."
         }
     }
     catch {
@@ -61,14 +64,14 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threadin
         try {
             Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
             [System.Windows.Forms.MessageBox]::Show(
-                "Die Benutzeroberfläche konnte nicht gestartet werden. Bitte die Datei '$script:LauncherLogPath' prüfen.",
-                'Winback Sicherung',
+                "Die Benutzeroberflaeche konnte nicht gestartet werden. Bitte die Datei '$script:LauncherLogPath' pruefen.",
+                $script:ApplicationTitle,
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             ) | Out-Null
         }
         catch {
-            Write-Error "Die Benutzeroberfläche konnte nicht gestartet werden: $($_.Exception.Message)"
+            Write-Error "Die Benutzeroberflaeche konnte nicht gestartet werden: $($_.Exception.Message)"
             Start-Sleep -Seconds 8
         }
     }
@@ -98,12 +101,31 @@ $OddDayTargetConfig = @{
     RelativePath = 'Backups'
 }
 
+# Optional: company name appended to the window title after "license for".
+$LicenseCompanyName = ''
+
 # Optional: set to $true to keep a timestamped subfolder per run instead of mirroring.
 $UseTimestampFolder = $false
+
+# Timestamp format for created folders when $UseTimestampFolder is enabled. Invalid
+# characters for Windows paths are automatically replaced with underscores.
+$TimestampFolderFormat = 'yyyy_MM_dd-HH:mm'
+
+# Optional: delete timestamped backup folders older than the specified number of days.
+# Applies only when $UseTimestampFolder is $true. Set to 0 or $null to disable cleanup.
+$TimestampRetentionDays = 0
 
 # Folder to store Robocopy logs. Will be created if it doesn't exist.
 $LogDirectory = $script:LogRoot
 #endregion ---------------------------------------------------------------------
+
+$companyNameForTitle = if ($null -ne $LicenseCompanyName) { $LicenseCompanyName.Trim() } else { '' }
+if ([string]::IsNullOrWhiteSpace($companyNameForTitle)) {
+    $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
+}
+else {
+    $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for $companyNameForTitle"
+}
 
 function Ensure-Directory {
     param(
@@ -218,7 +240,7 @@ function Resolve-DriveRoot {
         $root = [System.IO.Path]::GetPathRoot($expanded)
 
         if (-not $root) {
-            throw "Der Pfad '$expanded' ist ungültig. Bitte einen absoluten Zielpfad angeben."
+            throw "Der Pfad '$expanded' ist ungueltig. Bitte einen absoluten Zielpfad angeben."
         }
 
         return [PSCustomObject]@{
@@ -231,7 +253,7 @@ function Resolve-DriveRoot {
         $letter = $Config.DriveLetter.ToString().TrimEnd(':')
 
         if ([string]::IsNullOrWhiteSpace($letter)) {
-            throw "Die Laufwerksangabe für $RoleDescription Tage enthält keinen gültigen Buchstaben."
+            throw "Die Laufwerksangabe fuer $RoleDescription Tage enthaelt keinen gueltigen Buchstaben."
         }
 
         $driveRoot = "{0}:\" -f $letter.ToUpper()
@@ -263,7 +285,7 @@ function Resolve-DriveRoot {
         }
 
         if (-not $drive) {
-            throw "Das Laufwerk für $RoleDescription Tage mit dem Namen '$($Config.VolumeLabel)' wurde nicht gefunden."
+            throw "Das Laufwerk fuer $RoleDescription Tage mit dem Namen '$($Config.VolumeLabel)' wurde nicht gefunden."
         }
 
         $driveRoot = $drive.DeviceID + '\\'
@@ -281,7 +303,104 @@ function Resolve-DriveRoot {
         }
     }
 
-    throw "Konfiguration für $RoleDescription Tage ist unvollständig. Bitte entweder Path oder VolumeLabel/DriveLetter angeben."
+    throw "Konfiguration fuer $RoleDescription Tage ist unvollstaendig. Bitte entweder Path oder VolumeLabel/DriveLetter angeben."
+}
+
+function Get-TimestampFolderInfo {
+    param(
+        [Parameter(Mandatory)] [DateTime] $Date,
+        [Parameter()] [string] $Format = 'yyyy_MM_dd-HH:mm'
+    )
+
+    try {
+        $raw = $Date.ToString($Format)
+    }
+    catch {
+        $raw = $Date.ToString('yyyy_MM_dd-HHmm')
+    }
+
+    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
+    $builder = New-Object System.Text.StringBuilder
+
+    foreach ($char in $raw.ToCharArray()) {
+        if ($invalidChars -contains $char) {
+            [void]$builder.Append('_')
+        }
+        else {
+            [void]$builder.Append($char)
+        }
+    }
+
+    if ($builder.Length -eq 0) {
+        $fallback = $Date.ToString('yyyyMMddHHmmss')
+        [void]$builder.Append($fallback)
+    }
+
+    return [PSCustomObject]@{
+        Display   = $raw
+        Sanitized = $builder.ToString()
+    }
+}
+
+function Invoke-TimestampRetention {
+    param(
+        [Parameter(Mandatory)] [string] $BasePath,
+        [Parameter(Mandatory)] [int] $RetentionDays
+    )
+
+    $result = [PSCustomObject]@{
+        Removed = New-Object System.Collections.ArrayList
+        Failed  = New-Object System.Collections.ArrayList
+    }
+
+    if ($RetentionDays -le 0 -or -not (Test-Path -LiteralPath $BasePath)) {
+        return $result
+    }
+
+    try {
+        $threshold = (Get-Date).AddDays(-1 * $RetentionDays)
+        $candidates = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop
+
+        foreach ($entry in $candidates) {
+            $ageMarkers = @()
+
+            if ($entry.CreationTime -and $entry.CreationTime -gt [DateTime]::MinValue) {
+                $ageMarkers += $entry.CreationTime
+            }
+
+            if ($entry.LastWriteTime -and $entry.LastWriteTime -gt [DateTime]::MinValue) {
+                $ageMarkers += $entry.LastWriteTime
+            }
+
+            if ($ageMarkers.Count -eq 0) {
+                continue
+            }
+
+            $ageMarker = ($ageMarkers | Sort-Object -Descending | Select-Object -First 1)
+
+            if ($ageMarker -ge $threshold) {
+                continue
+            }
+
+            try {
+                Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                [void]$result.Removed.Add($entry.Name)
+                Write-LauncherLog -Message "Altes Sicherungsverzeichnis entfernt: $($entry.FullName)"
+            }
+            catch {
+                $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Ordner konnte nicht geloescht werden.'
+                [void]$result.Failed.Add("$($entry.Name): $message")
+                Write-LauncherLog -Message "Aufraeumen fehlgeschlagen fuer $($entry.FullName): $message"
+            }
+        }
+    }
+    catch {
+        $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Bereinigung fehlgeschlagen.'
+        [void]$result.Failed.Add($message)
+        Write-LauncherLog -Message "Bereinigung der Zeitstempel-Verzeichnisse fehlgeschlagen: $message"
+    }
+
+    return $result
 }
 
 function Get-TargetInfo {
@@ -289,7 +408,8 @@ function Get-TargetInfo {
         [Parameter(Mandatory)] [DateTime] $Date,
         [Parameter(Mandatory)] [hashtable] $EvenConfig,
         [Parameter(Mandatory)] [hashtable] $OddConfig,
-        [bool] $Timestamped = $false
+        [bool] $Timestamped = $false,
+        [string] $TimestampFormat = 'yyyy_MM_dd-HH:mm'
     )
 
     $isEvenDay = ($Date.Day % 2) -eq 0
@@ -299,11 +419,13 @@ function Get-TargetInfo {
     $resolved = Resolve-DriveRoot -Config $config -RoleDescription "$roleDescription"
 
     if ($Timestamped) {
-        $stamp = $Date.ToString('yyyy-MM-dd_HHmmss')
-        $destination = Join-Path -Path $resolved.BasePath -ChildPath $stamp
+        $timestampInfo = Get-TimestampFolderInfo -Date $Date -Format $TimestampFormat
+        $destination = Join-Path -Path $resolved.BasePath -ChildPath $timestampInfo.Sanitized
+        $displayName = $timestampInfo.Display
     }
     else {
         $destination = $resolved.BasePath
+        $displayName = $null
     }
 
     return [PSCustomObject]@{
@@ -311,11 +433,15 @@ function Get-TargetInfo {
         DriveRoot       = $resolved.DriveRoot
         BasePath        = $resolved.BasePath
         DestinationPath = $destination
+        TimestampLabel  = $displayName
+        UsingTimestamp  = $Timestamped
     }
 }
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
 function Show-ErrorDialog {
     param(
@@ -334,9 +460,9 @@ $surfaceColor  = [System.Drawing.Color]::White
 $backgroundCol = [System.Drawing.ColorTranslator]::FromHtml('#F5F7FB')
 
 $form = New-Object System.Windows.Forms.Form -Property @{
-    Text            = 'Winback Sicherung'
-    Size            = New-Object System.Drawing.Size(580, 520)
-    MinimumSize     = New-Object System.Drawing.Size(560, 480)
+    Text            = $script:ApplicationTitle
+    Size            = New-Object System.Drawing.Size(720, 560)
+    MinimumSize     = New-Object System.Drawing.Size(720, 560)
     FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
     MaximizeBox     = $false
     StartPosition   = 'CenterScreen'
@@ -411,7 +537,7 @@ $statusLabel = New-Object System.Windows.Forms.Label -Property @{
     Font      = New-Object System.Drawing.Font('Segoe UI', 10)
     ForeColor = $neutralColor
     Padding   = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
-    Text      = 'Bereit für Sicherung.'
+    Text      = 'Bereit fuer Sicherung.'
 }
 $statusPanel.Controls.Add($statusLabel)
 
@@ -487,7 +613,7 @@ $startButton.FlatAppearance.BorderSize = 0
 $startButton.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
 
 $openLogButton = New-Object System.Windows.Forms.Button -Property @{
-    Text                   = 'Logdatei öffnen'
+    Text                   = 'Logdatei oeffnen'
     AutoSize               = $true
     Padding                = New-Object System.Windows.Forms.Padding(16, 6, 16, 6)
     Enabled                = $false
@@ -500,7 +626,7 @@ $openLogButton.FlatAppearance.BorderSize = 0
 $openLogButton.Margin = New-Object System.Windows.Forms.Padding(6, 0, 0, 0)
 
 $closeButton = New-Object System.Windows.Forms.Button -Property @{
-    Text                   = 'Schließen'
+    Text                   = 'Schliessen'
     AutoSize               = $true
     Padding                = New-Object System.Windows.Forms.Padding(16, 6, 16, 6)
     BackColor              = [System.Drawing.ColorTranslator]::FromHtml('#F3F4F6')
@@ -535,7 +661,7 @@ function Set-Status {
     $progressBar.Visible = $IsRunning
 }
 
-Set-Status -Text 'Bereit für Sicherung.' -Color $neutralColor -IsRunning:$false
+Set-Status -Text 'Bereit fuer Sicherung.' -Color $neutralColor -IsRunning:$false
 
 $script:currentLogFile = $null
 $script:activeBackup   = $null
@@ -548,7 +674,6 @@ $pollTimer.add_Tick({
     }
 })
 
-
 function Start-BackupRun {
     $logTextBox.Clear()
     $openLogButton.Enabled = $false
@@ -559,17 +684,17 @@ function Start-BackupRun {
             return
         }
 
-        Set-Status -Text 'Prüfe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
+        Set-Status -Text 'Pruefe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
 
         if (-not (Test-Path -LiteralPath $SourcePath)) {
-            throw "Der Quellordner '$SourcePath' wurde nicht gefunden. Bitte Konfiguration prüfen."
+            throw "Der Quellordner '$SourcePath' wurde nicht gefunden. Bitte Konfiguration pruefen."
         }
 
         $today      = Get-Date
-        $targetInfo = Get-TargetInfo -Date $today -EvenConfig $EvenDayTargetConfig -OddConfig $OddDayTargetConfig -Timestamped:$UseTimestampFolder
+        $targetInfo = Get-TargetInfo -Date $today -EvenConfig $EvenDayTargetConfig -OddConfig $OddDayTargetConfig -Timestamped:$UseTimestampFolder -TimestampFormat $TimestampFolderFormat
 
         if ($targetInfo.DriveRoot -and -not (Test-Path -LiteralPath $targetInfo.DriveRoot)) {
-            throw "Das Laufwerk für $($targetInfo.RoleDescription) Tage ist nicht erreichbar. Bitte die passende USB-Festplatte anschließen."
+            throw "Das Laufwerk fuer $($targetInfo.RoleDescription) Tage ist nicht erreichbar. Bitte die passende USB-Festplatte anschliessen."
         }
 
         $targetRoot  = $targetInfo.DestinationPath
@@ -577,15 +702,19 @@ function Start-BackupRun {
         $logFile     = Join-Path -Path $LogDirectory -ChildPath $logFileName
 
         $logTextBox.AppendText("Ziel ($($targetInfo.RoleDescription) Tage): $targetRoot`r`n")
+        if ($targetInfo.TimestampLabel) {
+            $logTextBox.AppendText("Zeitstempel: $($targetInfo.TimestampLabel)`r`n")
+        }
         $logTextBox.AppendText("Robocopy-Protokoll: $logFile`r`n`r`n")
 
         $startButton.Enabled = $false
         $closeButton.Enabled = $false
 
         Write-LauncherLog -Message "Sicherung gestartet ($($targetInfo.RoleDescription) Tage) → $targetRoot"
-        Set-Status -Text "Sicherung läuft auf $targetRoot ..." -Color $accentColor -IsRunning $true
+        Set-Status -Text "Sicherung laeuft auf $targetRoot ..." -Color $accentColor -IsRunning $true
 
         Ensure-Directory -Path (Split-Path -Parent $logFile)
+        Ensure-Directory -Path $targetInfo.BasePath
         Ensure-Directory -Path $targetRoot
 
         $robocopyArgs = @(
@@ -620,6 +749,9 @@ function Start-BackupRun {
             LogPath = $logFile
             Target  = $targetRoot
             Role    = $targetInfo.RoleDescription
+            Stamp   = $targetInfo.TimestampLabel
+            Base    = $targetInfo.BasePath
+            TimestampMode = $targetInfo.UsingTimestamp
         }
 
         $pollTimer.Start()
@@ -675,9 +807,12 @@ function Complete-Backup {
 
     $script:currentLogFile = $logPath
     $logTextBox.AppendText("Logdatei: $logPath`r`n")
+    if ($result.Stamp) {
+        $logTextBox.AppendText("Zeitstempel: $($result.Stamp)`r`n")
+    }
 
     if ($exitCode -gt 7) {
-        Set-Status -Text 'Backup mit Fehler beendet. Log prüfen.' -Color $errorColor -IsRunning:$false
+        Set-Status -Text 'Backup mit Fehler beendet. Log pruefen.' -Color $errorColor -IsRunning:$false
         $errorMessage = "Robocopy meldet Fehler (Code $exitCode). Bitte Log ansehen."
         Show-ErrorDialog -Message $errorMessage
         $logTextBox.AppendText($errorMessage + "`r`n")
@@ -704,6 +839,26 @@ function Complete-Backup {
     }
 
     Write-LauncherLog -Message "Sicherung ($role) erfolgreich abgeschlossen (Code $exitCode)."
+
+    if ($result.TimestampMode -and $TimestampRetentionDays -gt 0) {
+        $logTextBox.AppendText("Starte Bereinigung fuer Ordner aelter als $TimestampRetentionDays Tage ...`r`n")
+        $cleanupResult = Invoke-TimestampRetention -BasePath $result.Base -RetentionDays $TimestampRetentionDays
+
+        if ($cleanupResult.Removed.Count -gt 0) {
+            foreach ($folder in $cleanupResult.Removed) {
+                $logTextBox.AppendText("Entfernt: $folder`r`n")
+            }
+        }
+        else {
+            $logTextBox.AppendText("Keine alten Ordner zum Entfernen gefunden.`r`n")
+        }
+
+        if ($cleanupResult.Failed.Count -gt 0) {
+            foreach ($item in $cleanupResult.Failed) {
+                $logTextBox.AppendText("Fehler beim Entfernen: $item`r`n")
+            }
+        }
+    }
 
     if ($shutdownCheckbox.Checked) {
         Set-Status -Text ($statusLabel.Text + ' | Herunterfahren wird gestartet.') -Color $successColor -IsRunning:$false
@@ -733,17 +888,17 @@ $form.Add_FormClosing({
     if ($script:activeBackup) {
         $e.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show(
-            'Die Sicherung läuft noch. Bitte warten Sie, bis der Vorgang abgeschlossen ist.',
-            'Winback Sicherung',
+            'Die Sicherung laeuft noch. Bitte warten Sie, bis der Vorgang abgeschlossen ist.',
+            $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null
     }
 })
 
-Write-LauncherLog -Message 'Benutzeroberfläche wird angezeigt'
+Write-LauncherLog -Message 'Benutzeroberflaeche wird angezeigt'
 [void]$form.ShowDialog()
-Write-LauncherLog -Message 'Benutzeroberfläche geschlossen'
+Write-LauncherLog -Message 'Benutzeroberflaeche geschlossen'
 }
 catch {
     Write-LauncherLog -Message ("Unbehandelter Fehler: " + $_.Exception.Message)
@@ -752,7 +907,7 @@ catch {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [System.Windows.Forms.MessageBox]::Show(
             "Es ist ein unerwarteter Fehler aufgetreten: $($_.Exception.Message)`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
-            'Winback Sicherung',
+            $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         ) | Out-Null
