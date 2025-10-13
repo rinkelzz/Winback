@@ -1,4 +1,4 @@
-# Winback
+# Backup by RinkelTech
 
 Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das ein bestimmtes Verzeichnis auf zwei USB-Festplatten sichert. An geraden Kalendertagen wird auf die erste Festplatte kopiert, an ungeraden Tagen auf die zweite. Nach erfolgreichem Backup kann der PC automatisch heruntergefahren werden.
 
@@ -10,8 +10,9 @@ Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das
    - `EvenDayTargetConfig` und `OddDayTargetConfig`: Hier beschreiben Sie die beiden USB-Festplatten.
      - Geben Sie idealerweise `VolumeLabel` (z. B. `Festplatte A`) sowie `RelativePath` (z. B. `Backups`) an. Damit findet das Skript die Festplatte anhand ihres Namens, egal welchen Laufwerksbuchstaben Windows vergibt.
      - Alternativ können Sie ein festes `Path` setzen (z. B. `E:\Backups`). Optional lässt sich `DriveLetter` ergänzen, um Name und Buchstaben gemeinsam anzuzeigen.
-  - `UseTimestampFolder` (optional): Auf `true` setzen, wenn für jedes Backup ein Unterordner erstellt werden soll.
-  - `TimestampFolderFormat` (optional): Datumsformat für diese Unterordner (Standard `yyyy_MM_dd-HH:mm`). Ungültige Zeichen für Windows-Pfade (z. B. `:`) werden automatisch durch Unterstriche ersetzt.
+   - `LicenseCompanyName` (optional): Text, der nach „license for“ im Fenstertitel erscheint – z. B. der Name Ihres Unternehmens.
+   - `UseTimestampFolder` (optional): Auf `true` setzen, wenn für jedes Backup ein Unterordner erstellt werden soll.
+   - `TimestampFolderFormat` (optional): Datumsformat für diese Unterordner (Standard `yyyy_MM_dd-HH:mm`). Ungültige Zeichen für Windows-Pfade (z. B. `:`) werden automatisch durch Unterstriche ersetzt.
    - `LogDirectory` (optional): Speicherort für die Robocopy-Protokolle. Standardmäßig werden die Dateien im Dokumente-Ordner unter `WinbackLogs` abgelegt, wo auch das Startprotokoll `launcher.log` gespeichert wird.
 
 > **Hinweis:** Durch die Zuordnung über `VolumeLabel` spielt es keine Rolle mehr, welchen Laufwerksbuchstaben Windows den Festplatten zuweist.
@@ -34,7 +35,7 @@ $OddDayTargetConfig = @{
 
 1. Verbinden Sie mindestens die USB-Festplatte, die dem aktuellen Kalendertag zugeordnet ist. Ist nur eine der beiden angeschlossen, startet die Sicherung trotzdem – das Skript überprüft anhand des eingestellten Datenträgers (Volume-Label/Laufwerksbuchstabe), ob wirklich das richtige Ziel gefunden wurde.
 2. Klicken Sie mit der rechten Maustaste auf die Datei `odd-even-backup.ps1` und wählen Sie **Mit PowerShell ausführen**. Das Skript startet automatisch im benötigten STA-Modus.
-3. Die Oberfläche zeigt Quelle, tagesabhängiges Ziel und einen farblich hervorgehobenen Statusbereich an. Starten Sie die Sicherung über **Backup starten** – während des Kopiervorgangs läuft ein dezenter Fortschrittsbalken, und im Protokollauszug erscheinen der Logpfad sowie die letzten Zeilen der Robocopy-Datei.
+3. Die Oberfläche zeigt Quelle, tagesabhängiges Ziel und einen farblich hervorgehobenen Statusbereich an. Der Fenstertitel lautet „Backup by RinkelTech license for …“ und ergänzt – sofern konfiguriert – automatisch Ihren Firmennamen. Starten Sie die Sicherung über **Backup starten** – während des Kopiervorgangs läuft ein dezenter Fortschrittsbalken, und im Protokollauszug erscheinen der Logpfad sowie die letzten Zeilen der Robocopy-Datei.
 4. Aktivieren Sie optional die Checkbox **Nach erfolgreichem Backup herunterfahren**, um den PC direkt nach erfolgreichem Kopiervorgang herunterzufahren.
 5. Über **Logdatei öffnen** lässt sich der vollständige Robocopy-Log anschließend in Notepad ansehen.
 

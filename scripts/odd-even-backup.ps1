@@ -37,6 +37,9 @@ function Write-LauncherLog {
 
 Write-LauncherLog -Message 'Skriptstart'
 
+$script:ApplicationTitleBase = 'Backup by RinkelTech'
+$script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
+
 if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
     Write-LauncherLog -Message 'Neustart mit STA-Anforderung'
 
@@ -62,7 +65,7 @@ if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threadin
             Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
             [System.Windows.Forms.MessageBox]::Show(
                 "Die Benutzeroberflaeche konnte nicht gestartet werden. Bitte die Datei '$script:LauncherLogPath' pruefen.",
-                'Winback Sicherung',
+                $script:ApplicationTitle,
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             ) | Out-Null
@@ -98,6 +101,9 @@ $OddDayTargetConfig = @{
     RelativePath = 'Backups'
 }
 
+# Optional: company name appended to the window title after "license for".
+$LicenseCompanyName = ''
+
 # Optional: set to $true to keep a timestamped subfolder per run instead of mirroring.
 $UseTimestampFolder = $false
 
@@ -108,6 +114,14 @@ $TimestampFolderFormat = 'yyyy_MM_dd-HH:mm'
 # Folder to store Robocopy logs. Will be created if it doesn't exist.
 $LogDirectory = $script:LogRoot
 #endregion ---------------------------------------------------------------------
+
+$companyNameForTitle = if ($null -ne $LicenseCompanyName) { $LicenseCompanyName.Trim() } else { '' }
+if ([string]::IsNullOrWhiteSpace($companyNameForTitle)) {
+    $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
+}
+else {
+    $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for $companyNameForTitle"
+}
 
 function Ensure-Directory {
     param(
@@ -380,7 +394,7 @@ $surfaceColor  = [System.Drawing.Color]::White
 $backgroundCol = [System.Drawing.ColorTranslator]::FromHtml('#F5F7FB')
 
 $form = New-Object System.Windows.Forms.Form -Property @{
-    Text            = 'Winback Sicherung'
+    Text            = $script:ApplicationTitle
     Size            = New-Object System.Drawing.Size(720, 560)
     MinimumSize     = New-Object System.Drawing.Size(720, 560)
     FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
@@ -786,7 +800,7 @@ $form.Add_FormClosing({
         $e.Cancel = $true
         [System.Windows.Forms.MessageBox]::Show(
             'Die Sicherung laeuft noch. Bitte warten Sie, bis der Vorgang abgeschlossen ist.',
-            'Winback Sicherung',
+            $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Warning
         ) | Out-Null
@@ -804,7 +818,7 @@ catch {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [System.Windows.Forms.MessageBox]::Show(
             "Es ist ein unerwarteter Fehler aufgetreten: $($_.Exception.Message)`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
-            'Winback Sicherung',
+            $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         ) | Out-Null
