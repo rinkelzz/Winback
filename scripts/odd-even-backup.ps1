@@ -170,6 +170,42 @@ function Format-ByteSize {
     return ('{0:N1} {1}' -f $size, $units[$index])
 }
 
+function Find-DriveByVolumeLabel {
+    param(
+        [Parameter(Mandatory)] [string] $Label
+    )
+
+    try {
+        $drives = [System.IO.DriveInfo]::GetDrives()
+    }
+    catch {
+        return $null
+    }
+
+    foreach ($drive in $drives) {
+        try {
+            if (-not $drive.IsReady) {
+                continue
+            }
+
+            $volumeLabel = $drive.VolumeLabel
+
+            if ([string]::IsNullOrWhiteSpace($volumeLabel)) {
+                continue
+            }
+
+            if ($volumeLabel.Equals($Label, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $drive
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    return $null
+}
+
 function Get-FriendlyErrorMessage {
     param(
         [Parameter()] [object] $ErrorObject,
@@ -435,27 +471,15 @@ function Get-DriveCapacityStatus {
         }
 
         if ($Config.ContainsKey('VolumeLabel') -and $Config.VolumeLabel) {
-            try {
-                $drive = Get-CimInstance -ClassName Win32_LogicalDisk -ErrorAction Stop |
-                    Where-Object { $_.VolumeName -eq $Config.VolumeLabel }
-            }
-            catch {
-                $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Laufwerk konnte nicht geprueft werden.'
-                $result.Text = $message
-                return $result
-            }
-
-            if ($drive -is [System.Array]) {
-                $drive = $drive | Select-Object -First 1
-            }
+            $drive = Find-DriveByVolumeLabel -Label $Config.VolumeLabel
 
             if (-not $drive) {
                 $result.Text = "Laufwerk '$($Config.VolumeLabel)' nicht verbunden."
                 return $result
             }
 
-            $root = $drive.DeviceID + '\\'
-            $result.Text = "Laufwerk $root: Frei " + (Format-ByteSize $drive.FreeSpace) + ' von ' + (Format-ByteSize $drive.Size)
+            $root = $drive.RootDirectory.FullName
+            $result.Text = "Laufwerk $root: Frei " + (Format-ByteSize $drive.AvailableFreeSpace) + ' von ' + (Format-ByteSize $drive.TotalSize)
             $result.IsAvailable = $true
             return $result
         }
@@ -549,23 +573,13 @@ function Resolve-DriveRoot {
     }
 
     if ($Config.ContainsKey('VolumeLabel') -and $Config.VolumeLabel) {
-        try {
-            $drive = Get-CimInstance -ClassName Win32_LogicalDisk -ErrorAction Stop |
-                Where-Object { $_.VolumeName -eq $Config.VolumeLabel }
-        }
-        catch {
-            throw "Die Laufwerksinformationen konnten nicht ermittelt werden: $($_.Exception.Message)"
-        }
-
-        if ($drive -is [System.Array]) {
-            $drive = $drive | Select-Object -First 1
-        }
+        $drive = Find-DriveByVolumeLabel -Label $Config.VolumeLabel
 
         if (-not $drive) {
             throw "Das Laufwerk fuer $RoleDescription Tage mit dem Namen '$($Config.VolumeLabel)' wurde nicht gefunden."
         }
 
-        $driveRoot = $drive.DeviceID + '\\'
+        $driveRoot = $drive.RootDirectory.FullName
 
         if ($Config.ContainsKey('RelativePath') -and $Config.RelativePath) {
             $basePath = Join-Path -Path $driveRoot -ChildPath $Config.RelativePath
@@ -577,8 +591,8 @@ function Resolve-DriveRoot {
         return [PSCustomObject]@{
             DriveRoot = $driveRoot
             BasePath  = $basePath
-            FreeBytes = [long]$drive.FreeSpace
-            TotalBytes = [long]$drive.Size
+            FreeBytes = [long]$drive.AvailableFreeSpace
+            TotalBytes = [long]$drive.TotalSize
         }
     }
 
@@ -1331,8 +1345,16 @@ Write-LauncherLog -Message 'Benutzeroberflaeche wird angezeigt'
 Write-LauncherLog -Message 'Benutzeroberflaeche geschlossen'
 }
 catch {
-    $unhandledMessage = $_.Exception.Message
+    $unhandledRecord = $_
+    $unhandledMessage = Get-FriendlyErrorMessage -ErrorObject $unhandledRecord -Fallback 'Es ist ein unerwarteter Fehler aufgetreten.'
     Write-LauncherLog -Message ("Unbehandelter Fehler: " + $unhandledMessage)
+
+    $detailText = ($unhandledRecord | Out-String).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($detailText)) {
+        foreach ($line in $detailText -split "`r?`n") {
+            Write-LauncherLog -Message ("Detail: " + $line)
+        }
+    }
 
     $attachments = @()
     if ($script:currentLogFile -and (Test-Path -LiteralPath $script:currentLogFile)) {
@@ -1342,12 +1364,13 @@ catch {
         $attachments += $script:LauncherLogPath
     }
 
-    Submit-ErrorReport -Context 'Unerwarteter Fehler' -Details $unhandledMessage -Attachments $attachments
+    $reportDetails = if (-not [string]::IsNullOrWhiteSpace($detailText)) { $detailText } else { $unhandledMessage }
+    Submit-ErrorReport -Context 'Unerwarteter Fehler' -Details $reportDetails -Attachments $attachments
 
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [System.Windows.Forms.MessageBox]::Show(
-            "Es ist ein unerwarteter Fehler aufgetreten: $($unhandledMessage)`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
+            "Es ist ein unerwarteter Fehler aufgetreten: $unhandledMessage`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
             $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error

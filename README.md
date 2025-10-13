@@ -58,7 +58,7 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 ## Weitere Hinweise
 
 - Das Skript verwendet `robocopy`, das standardmäßig unter Windows 11 vorhanden ist.
-- Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Das Startprotokoll dokumentiert Startzeit, Abschluss (inklusive Robocopy-Code) und mögliche Fehler.
+- Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Das Startprotokoll dokumentiert Startzeit, Abschluss (inklusive Robocopy-Code) und schreibt bei unerwarteten Abbrüchen jetzt auch die vollständigen Fehlermeldungen mit.
 - Wenn sich die PowerShell direkt wieder schließt, öffnen Sie `launcher.log`, um die Ursache zu sehen (z. B. fehlende USB-Festplatte oder blockierte Datei). Bei blockierten Dateien hilft `Unblock-File -Path .\odd-even-backup.ps1` in einer administrativen PowerShell.
 - Der Statusbereich und zusätzliche Hinweisdialoge geben klare Fehlermeldungen aus, z. B. wenn ein Laufwerk nicht gefunden wird oder Robocopy mit einem Fehlercode stoppt.
 - Während des Kopiervorgangs bleibt die Oberfläche aktiv und verhindert ein versehentliches Schließen. Nach Abschluss wird der Startknopf wieder freigegeben und Sie können die Logdatei direkt öffnen.
@@ -67,6 +67,7 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 - Ist `TimestampRetentionDays` größer als `0`, entfernt das Skript nach einem erfolgreichen Lauf automatisch alle älteren Zeitstempel-Ordner aus dem Zielverzeichnis und protokolliert jeden gelöschten Ordner im Fenster sowie in `launcher.log`.
 - Direkt nach einem erfolgreichen Kopiervorgang aktualisiert das Skript die Zeitstempel des frisch erstellten Backup-Ordners und schützt ihn zusätzlich explizit vor der Bereinigung, damit neue Sicherungen auch bei sehr kurzen Aufbewahrungsfristen erhalten bleiben.
 - Unter „Speicherkapazität“ sehen Sie jederzeit, wie viel Platz auf den beiden konfigurierten Laufwerken frei ist. Fehlende oder nicht verbundene Datenträger werden dort rot markiert.
+- Die Erkennung über `VolumeLabel` funktioniert komplett über die Windows-API (`System.IO.DriveInfo`) und benötigt daher keinen WMI-/CIM-Dienst mehr – das Fenster startet so auch dann zuverlässig, wenn WMI deaktiviert oder defekt ist.
 - Aktivieren Sie bei Bedarf die Fehlerbenachrichtigung per E-Mail, um Robocopy-Logs und das Launcher-Protokoll bei Problemen automatisch zu erhalten.
 
 ### Fehlerprotokolle automatisch versenden
