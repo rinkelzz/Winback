@@ -111,8 +111,24 @@ $UseTimestampFolder = $false
 # characters for Windows paths are automatically replaced with underscores.
 $TimestampFolderFormat = 'yyyy_MM_dd-HH:mm'
 
+# Optional: delete timestamped backup folders older than the specified number of days.
+# Applies only when $UseTimestampFolder is $true. Set to 0 or $null to disable cleanup.
+$TimestampRetentionDays = 0
+
 # Folder to store Robocopy logs. Will be created if it doesn't exist.
 $LogDirectory = $script:LogRoot
+
+# Optional: send error reports with log files when a backup fails. Configure SMTP
+# connection details if enabled.
+$EmailErrorReportsEnabled = $false
+$EmailSmtpServer         = ''
+$EmailSmtpPort           = 587
+$EmailUseSsl             = $true
+$EmailFromAddress        = ''
+$EmailToAddresses        = 'backup@rinkel.tech'
+$EmailSubjectPrefix      = 'Backup Fehler'
+$EmailSmtpUsername       = ''
+$EmailSmtpPassword       = ''
 #endregion ---------------------------------------------------------------------
 
 $companyNameForTitle = if ($null -ne $LicenseCompanyName) { $LicenseCompanyName.Trim() } else { '' }
@@ -131,6 +147,27 @@ function Ensure-Directory {
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
+}
+
+function Format-ByteSize {
+    param(
+        [Parameter()] [Nullable[long]] $Value
+    )
+
+    if (-not $Value.HasValue -or $Value.Value -lt 0) {
+        return 'unbekannt'
+    }
+
+    $units = @('Bytes','KB','MB','GB','TB','PB')
+    $size  = [double]$Value.Value
+    $index = 0
+
+    while ($size -ge 1024 -and $index -lt $units.Count - 1) {
+        $size /= 1024
+        $index++
+    }
+
+    return ('{0:N1} {1}' -f $size, $units[$index])
 }
 
 function Get-FriendlyErrorMessage {
@@ -183,6 +220,141 @@ function Show-UiError {
     return $message
 }
 
+function Get-EmailRecipients {
+    param(
+        [Parameter()] [string] $Addresses
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Addresses)) {
+        return @()
+    }
+
+    return $Addresses -split '[;,]' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() }
+}
+
+function Send-ErrorReport {
+    param(
+        [Parameter(Mandatory)] [string] $Subject,
+        [Parameter(Mandatory)] [string] $Body,
+        [string[]] $Attachments = @()
+    )
+
+    if (-not $EmailErrorReportsEnabled) {
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($EmailSmtpServer) -or [string]::IsNullOrWhiteSpace($EmailFromAddress)) {
+        Write-LauncherLog -Message 'E-Mail-Benachrichtigung nicht moeglich: SMTP-Server oder Absender fehlt.'
+        return
+    }
+
+    $recipients = Get-EmailRecipients -Addresses $EmailToAddresses
+
+    if ($recipients.Count -eq 0) {
+        Write-LauncherLog -Message 'E-Mail-Benachrichtigung nicht moeglich: Keine gueltigen Empfaenger.'
+        return
+    }
+
+    try {
+        $client = New-Object System.Net.Mail.SmtpClient($EmailSmtpServer, [int]$EmailSmtpPort)
+        $client.EnableSsl = [bool]$EmailUseSsl
+
+        if (-not [string]::IsNullOrWhiteSpace($EmailSmtpUsername)) {
+            $client.Credentials = New-Object System.Net.NetworkCredential($EmailSmtpUsername, $EmailSmtpPassword)
+        }
+
+        $message = New-Object System.Net.Mail.MailMessage
+        $message.From = $EmailFromAddress
+
+        foreach ($address in $recipients) {
+            [void]$message.To.Add($address)
+        }
+
+        $message.Subject = $Subject
+        $message.Body    = $Body
+
+        $attachmentsToDispose = @()
+
+        foreach ($path in $Attachments) {
+            if ([string]::IsNullOrWhiteSpace($path)) {
+                continue
+            }
+
+            if (-not (Test-Path -LiteralPath $path)) {
+                Write-LauncherLog -Message "E-Mail-Anhang fehlt: $path"
+                continue
+            }
+
+            try {
+                $attachment = New-Object System.Net.Mail.Attachment($path)
+                $attachmentsToDispose += $attachment
+                [void]$message.Attachments.Add($attachment)
+            }
+            catch {
+                $errorMessage = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Anhang konnte nicht hinzugefuegt werden.'
+                Write-LauncherLog -Message "E-Mail-Anhang konnte nicht hinzugefuegt werden: $errorMessage"
+            }
+        }
+
+        try {
+            $client.Send($message)
+            Write-LauncherLog -Message 'Fehlerbenachrichtigung per E-Mail versendet.'
+        }
+        finally {
+            foreach ($item in $attachmentsToDispose) {
+                $item.Dispose()
+            }
+
+            $message.Dispose()
+            $client.Dispose()
+        }
+    }
+    catch {
+        $errorMessage = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'E-Mail-Versand fehlgeschlagen.'
+        Write-LauncherLog -Message "E-Mail-Versand fehlgeschlagen: $errorMessage"
+    }
+}
+
+function Submit-ErrorReport {
+    param(
+        [Parameter(Mandatory)] [string] $Context,
+        [string] $Details,
+        [string[]] $Attachments = @()
+    )
+
+    if (-not $EmailErrorReportsEnabled) {
+        return
+    }
+
+    $subject = if ([string]::IsNullOrWhiteSpace($EmailSubjectPrefix)) {
+        "Backup-Fehler: $Context"
+    }
+    else {
+        "$EmailSubjectPrefix - $Context"
+    }
+
+    $bodyBuilder = New-Object System.Text.StringBuilder
+    [void]$bodyBuilder.AppendLine("Zeitpunkt: " + (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+    [void]$bodyBuilder.AppendLine("Computer: " + [Environment]::MachineName)
+    [void]$bodyBuilder.AppendLine("Kontext: $Context")
+
+    if (-not [string]::IsNullOrWhiteSpace($Details)) {
+        [void]$bodyBuilder.AppendLine('')
+        [void]$bodyBuilder.AppendLine('Details:')
+        [void]$bodyBuilder.AppendLine($Details)
+    }
+
+    $safeAttachments = @()
+
+    foreach ($item in ($Attachments | Select-Object -Unique)) {
+        if (-not [string]::IsNullOrWhiteSpace($item) -and (Test-Path -LiteralPath $item)) {
+            $safeAttachments += $item
+        }
+    }
+
+    Send-ErrorReport -Subject $subject -Body $bodyBuilder.ToString() -Attachments $safeAttachments
+}
+
 function Get-ConfigDescription {
     param(
         [Parameter(Mandatory)] [hashtable] $Config
@@ -225,6 +397,99 @@ function Get-ConfigDescription {
     return 'Nicht konfiguriert'
 }
 
+function Get-DriveCapacityStatus {
+    param(
+        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter(Mandatory)] [string] $RoleDescription
+    )
+
+    $result = [PSCustomObject]@{
+        Text       = 'Nicht konfiguriert.'
+        IsAvailable = $false
+    }
+
+    if (-not $Config) {
+        return $result
+    }
+
+    try {
+        if ($Config.ContainsKey('Path') -and $Config.Path) {
+            $expanded = [Environment]::ExpandEnvironmentVariables($Config.Path)
+            $root = [System.IO.Path]::GetPathRoot($expanded)
+
+            if (-not $root) {
+                $result.Text = "Pfad fuer $RoleDescription Tage ungueltig."
+                return $result
+            }
+
+            $driveInfo = New-Object System.IO.DriveInfo($root)
+
+            if (-not $driveInfo.IsReady) {
+                $result.Text = "Laufwerk $root nicht verfuegbar."
+                return $result
+            }
+
+            $result.Text = "Laufwerk $root: Frei " + (Format-ByteSize $driveInfo.AvailableFreeSpace) + ' von ' + (Format-ByteSize $driveInfo.TotalSize)
+            $result.IsAvailable = $true
+            return $result
+        }
+
+        if ($Config.ContainsKey('VolumeLabel') -and $Config.VolumeLabel) {
+            try {
+                $drive = Get-CimInstance -ClassName Win32_LogicalDisk -ErrorAction Stop |
+                    Where-Object { $_.VolumeName -eq $Config.VolumeLabel }
+            }
+            catch {
+                $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Laufwerk konnte nicht geprueft werden.'
+                $result.Text = $message
+                return $result
+            }
+
+            if ($drive -is [System.Array]) {
+                $drive = $drive | Select-Object -First 1
+            }
+
+            if (-not $drive) {
+                $result.Text = "Laufwerk '$($Config.VolumeLabel)' nicht verbunden."
+                return $result
+            }
+
+            $root = $drive.DeviceID + '\\'
+            $result.Text = "Laufwerk $root: Frei " + (Format-ByteSize $drive.FreeSpace) + ' von ' + (Format-ByteSize $drive.Size)
+            $result.IsAvailable = $true
+            return $result
+        }
+
+        if ($Config.ContainsKey('DriveLetter') -and $Config.DriveLetter) {
+            $letter = $Config.DriveLetter.ToString().TrimEnd(':')
+
+            if ([string]::IsNullOrWhiteSpace($letter)) {
+                $result.Text = "Laufwerksbuchstabe fuer $RoleDescription Tage ungueltig."
+                return $result
+            }
+
+            $root = "{0}:\" -f $letter.ToUpper()
+            $driveInfo = New-Object System.IO.DriveInfo($root)
+
+            if (-not $driveInfo.IsReady) {
+                $result.Text = "Laufwerk $root nicht verfuegbar."
+                return $result
+            }
+
+            $result.Text = "Laufwerk $root: Frei " + (Format-ByteSize $driveInfo.AvailableFreeSpace) + ' von ' + (Format-ByteSize $driveInfo.TotalSize)
+            $result.IsAvailable = $true
+            return $result
+        }
+    }
+    catch {
+        $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Speicherabfrage fehlgeschlagen.'
+        $result.Text = $message
+        return $result
+    }
+
+    return $result
+}
+
 function Resolve-DriveRoot {
     param(
         [Parameter(Mandatory)] [hashtable] $Config,
@@ -239,9 +504,17 @@ function Resolve-DriveRoot {
             throw "Der Pfad '$expanded' ist ungueltig. Bitte einen absoluten Zielpfad angeben."
         }
 
+        $driveInfo = New-Object System.IO.DriveInfo($root)
+
+        if (-not $driveInfo.IsReady) {
+            throw "Das Laufwerk '$root' ist nicht bereit oder nicht verbunden."
+        }
+
         return [PSCustomObject]@{
             DriveRoot = $root
             BasePath  = $expanded
+            FreeBytes = $driveInfo.AvailableFreeSpace
+            TotalBytes = $driveInfo.TotalSize
         }
     }
 
@@ -261,9 +534,17 @@ function Resolve-DriveRoot {
             $basePath = $driveRoot
         }
 
+        $driveInfo = New-Object System.IO.DriveInfo($driveRoot)
+
+        if (-not $driveInfo.IsReady) {
+            throw "Das Laufwerk fuer $RoleDescription Tage ($driveRoot) ist nicht bereit oder nicht verbunden."
+        }
+
         return [PSCustomObject]@{
             DriveRoot = $driveRoot
             BasePath  = $basePath
+            FreeBytes = $driveInfo.AvailableFreeSpace
+            TotalBytes = $driveInfo.TotalSize
         }
     }
 
@@ -296,6 +577,8 @@ function Resolve-DriveRoot {
         return [PSCustomObject]@{
             DriveRoot = $driveRoot
             BasePath  = $basePath
+            FreeBytes = [long]$drive.FreeSpace
+            TotalBytes = [long]$drive.Size
         }
     }
 
@@ -338,6 +621,80 @@ function Get-TimestampFolderInfo {
     }
 }
 
+function Invoke-TimestampRetention {
+    param(
+        [Parameter(Mandatory)] [string] $BasePath,
+        [Parameter(Mandatory)] [int] $RetentionDays,
+        [string[]] $ProtectedNames = @()
+    )
+
+    $result = [PSCustomObject]@{
+        Removed = New-Object System.Collections.ArrayList
+        Failed  = New-Object System.Collections.ArrayList
+    }
+
+    if ($RetentionDays -le 0 -or -not (Test-Path -LiteralPath $BasePath)) {
+        return $result
+    }
+
+    try {
+        $threshold = (Get-Date).AddDays(-1 * $RetentionDays)
+        $candidates = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop
+
+        $protectedSet = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in $ProtectedNames) {
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                [void]$protectedSet.Add($name.Trim())
+            }
+        }
+
+        foreach ($entry in $candidates) {
+            if ($protectedSet.Contains($entry.Name)) {
+                Write-LauncherLog -Message "Bereinigung uebersprungen fuer aktives Verzeichnis: $($entry.FullName)"
+                continue
+            }
+
+            $ageMarkers = @()
+
+            if ($entry.CreationTime -and $entry.CreationTime -gt [DateTime]::MinValue) {
+                $ageMarkers += $entry.CreationTime
+            }
+
+            if ($entry.LastWriteTime -and $entry.LastWriteTime -gt [DateTime]::MinValue) {
+                $ageMarkers += $entry.LastWriteTime
+            }
+
+            if ($ageMarkers.Count -eq 0) {
+                continue
+            }
+
+            $ageMarker = ($ageMarkers | Sort-Object -Descending | Select-Object -First 1)
+
+            if ($ageMarker -ge $threshold) {
+                continue
+            }
+
+            try {
+                Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+                [void]$result.Removed.Add($entry.Name)
+                Write-LauncherLog -Message "Altes Sicherungsverzeichnis entfernt: $($entry.FullName)"
+            }
+            catch {
+                $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Ordner konnte nicht geloescht werden.'
+                [void]$result.Failed.Add("$($entry.Name): $message")
+                Write-LauncherLog -Message "Aufraeumen fehlgeschlagen fuer $($entry.FullName): $message"
+            }
+        }
+    }
+    catch {
+        $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Bereinigung fehlgeschlagen.'
+        [void]$result.Failed.Add($message)
+        Write-LauncherLog -Message "Bereinigung der Zeitstempel-Verzeichnisse fehlgeschlagen: $message"
+    }
+
+    return $result
+}
+
 function Get-TargetInfo {
     param(
         [Parameter(Mandatory)] [DateTime] $Date,
@@ -369,6 +726,9 @@ function Get-TargetInfo {
         BasePath        = $resolved.BasePath
         DestinationPath = $destination
         TimestampLabel  = $displayName
+        UsingTimestamp  = $Timestamped
+        DriveFreeBytes  = $resolved.FreeBytes
+        DriveTotalBytes = $resolved.TotalBytes
     }
 }
 
@@ -407,10 +767,11 @@ $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $tableLayout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{
     Dock        = 'Fill'
     ColumnCount = 1
-    RowCount    = 4
+    RowCount    = 5
     BackColor   = $backgroundCol
     Padding     = New-Object System.Windows.Forms.Padding(14)
 }
+$tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 $tableLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
@@ -447,6 +808,71 @@ $infoLabel = New-Object System.Windows.Forms.Label -Property @{
 }
 $headerPanel.Controls.Add($infoLabel)
 $tableLayout.Controls.Add($headerPanel, 0, 0)
+
+$capacityPanel = New-Object System.Windows.Forms.Panel -Property @{
+    BackColor = $surfaceColor
+    AutoSize  = $true
+    Dock      = 'Top'
+    Padding   = New-Object System.Windows.Forms.Padding(16, 12, 16, 12)
+    Margin    = New-Object System.Windows.Forms.Padding(0, 0, 0, 12)
+}
+
+$capacityCaption = New-Object System.Windows.Forms.Label -Property @{
+    Text     = 'Speicherkapazitaet'
+    AutoSize = $true
+    Font     = New-Object System.Drawing.Font('Segoe UI Semibold', 11)
+    ForeColor = $accentColor
+    Dock     = 'Top'
+}
+$capacityPanel.Controls.Add($capacityCaption)
+
+$capacityTable = New-Object System.Windows.Forms.TableLayoutPanel -Property @{
+    ColumnCount = 2
+    AutoSize    = $true
+    Dock        = 'Top'
+    BackColor   = [System.Drawing.Color]::Transparent
+    Margin      = New-Object System.Windows.Forms.Padding(0, 6, 0, 0)
+}
+$capacityTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+$capacityTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+
+$evenDriveLabel = New-Object System.Windows.Forms.Label -Property @{
+    Text      = 'Gerade Tage'
+    AutoSize  = $true
+    ForeColor = $neutralColor
+    Dock      = 'Fill'
+    Padding   = New-Object System.Windows.Forms.Padding(0, 0, 18, 6)
+}
+$capacityTable.Controls.Add($evenDriveLabel, 0, 0)
+
+$evenDriveStatusLabel = New-Object System.Windows.Forms.Label -Property @{
+    AutoSize  = $true
+    ForeColor = $neutralColor
+    Dock      = 'Fill'
+    Padding   = New-Object System.Windows.Forms.Padding(0, 0, 0, 6)
+    Text      = 'Keine Daten verfuegbar.'
+}
+$capacityTable.Controls.Add($evenDriveStatusLabel, 1, 0)
+
+$oddDriveLabel = New-Object System.Windows.Forms.Label -Property @{
+    Text      = 'Ungerade Tage'
+    AutoSize  = $true
+    ForeColor = $neutralColor
+    Dock      = 'Fill'
+    Padding   = New-Object System.Windows.Forms.Padding(0, 0, 18, 0)
+}
+$capacityTable.Controls.Add($oddDriveLabel, 0, 1)
+
+$oddDriveStatusLabel = New-Object System.Windows.Forms.Label -Property @{
+    AutoSize  = $true
+    ForeColor = $neutralColor
+    Dock      = 'Fill'
+    Text      = 'Keine Daten verfuegbar.'
+}
+$capacityTable.Controls.Add($oddDriveStatusLabel, 1, 1)
+
+$capacityPanel.Controls.Add($capacityTable)
+$tableLayout.Controls.Add($capacityPanel, 0, 1)
 
 $statusPanel = New-Object System.Windows.Forms.Panel -Property @{
     BackColor = $surfaceColor
@@ -485,7 +911,19 @@ $progressBar.Height = 18
 $progressBar.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
 $statusPanel.Controls.Add($progressBar)
 
-$tableLayout.Controls.Add($statusPanel, 0, 1)
+$tableLayout.Controls.Add($statusPanel, 0, 2)
+
+$script:updateCapacityDisplay = {
+    $evenStatus = Get-DriveCapacityStatus -Config $EvenDayTargetConfig -RoleDescription 'gerade'
+    $evenDriveStatusLabel.Text = $evenStatus.Text
+    $evenDriveStatusLabel.ForeColor = if ($evenStatus.IsAvailable) { $neutralColor } else { $errorColor }
+
+    $oddStatus = Get-DriveCapacityStatus -Config $OddDayTargetConfig -RoleDescription 'ungerade'
+    $oddDriveStatusLabel.Text = $oddStatus.Text
+    $oddDriveStatusLabel.ForeColor = if ($oddStatus.IsAvailable) { $neutralColor } else { $errorColor }
+}
+
+&$script:updateCapacityDisplay
 
 $logGroup = New-Object System.Windows.Forms.GroupBox -Property @{
     Text     = 'Protokollauszug'
@@ -506,7 +944,7 @@ $logTextBox = New-Object System.Windows.Forms.TextBox -Property @{
 }
 $logTextBox.Margin = New-Object System.Windows.Forms.Padding(0)
 $logGroup.Controls.Add($logTextBox)
-$tableLayout.Controls.Add($logGroup, 0, 2)
+$tableLayout.Controls.Add($logGroup, 0, 3)
 
 $footerLayout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{
     ColumnCount = 2
@@ -576,7 +1014,7 @@ $buttonFlow.Controls.Add($openLogButton)
 $buttonFlow.Controls.Add($closeButton)
 
 $footerLayout.Controls.Add($buttonFlow, 1, 0)
-$tableLayout.Controls.Add($footerLayout, 0, 3)
+$tableLayout.Controls.Add($footerLayout, 0, 4)
 
 $form.AcceptButton = $startButton
 $form.CancelButton = $closeButton
@@ -611,6 +1049,11 @@ $pollTimer.add_Tick({
 function Start-BackupRun {
     $logTextBox.Clear()
     $openLogButton.Enabled = $false
+    $script:currentLogFile = $null
+
+    if ($script:updateCapacityDisplay) {
+        &$script:updateCapacityDisplay
+    }
 
     try {
         if ($script:activeBackup) {
@@ -639,6 +1082,9 @@ function Start-BackupRun {
         if ($targetInfo.TimestampLabel) {
             $logTextBox.AppendText("Zeitstempel: $($targetInfo.TimestampLabel)`r`n")
         }
+        if ($null -ne $targetInfo.DriveFreeBytes -and $null -ne $targetInfo.DriveTotalBytes) {
+            $logTextBox.AppendText("Freier Speicher: " + (Format-ByteSize $targetInfo.DriveFreeBytes) + ' von ' + (Format-ByteSize $targetInfo.DriveTotalBytes) + "`r`n")
+        }
         $logTextBox.AppendText("Robocopy-Protokoll: $logFile`r`n`r`n")
 
         $startButton.Enabled = $false
@@ -648,6 +1094,7 @@ function Start-BackupRun {
         Set-Status -Text "Sicherung laeuft auf $targetRoot ..." -Color $accentColor -IsRunning $true
 
         Ensure-Directory -Path (Split-Path -Parent $logFile)
+        Ensure-Directory -Path $targetInfo.BasePath
         Ensure-Directory -Path $targetRoot
 
         $robocopyArgs = @(
@@ -683,6 +1130,9 @@ function Start-BackupRun {
             Target  = $targetRoot
             Role    = $targetInfo.RoleDescription
             Stamp   = $targetInfo.TimestampLabel
+            Base    = $targetInfo.BasePath
+            TimestampMode = $targetInfo.UsingTimestamp
+            FolderName = if ($targetInfo.UsingTimestamp) { [System.IO.Path]::GetFileName($targetRoot) } else { $null }
         }
 
         $pollTimer.Start()
@@ -697,6 +1147,20 @@ function Start-BackupRun {
         $message = Show-UiError -ErrorObject $_ -Fallback 'Die Sicherung konnte nicht gestartet werden.'
         Set-Status -Text 'Fehler beim Start.' -Color $errorColor -IsRunning:$false
         Write-LauncherLog -Message "Start fehlgeschlagen: $message"
+
+        if ($script:updateCapacityDisplay) {
+            &$script:updateCapacityDisplay
+        }
+
+        $attachments = @()
+        if ($script:currentLogFile -and (Test-Path -LiteralPath $script:currentLogFile)) {
+            $attachments += $script:currentLogFile
+        }
+        if (Test-Path -LiteralPath $script:LauncherLogPath) {
+            $attachments += $script:LauncherLogPath
+        }
+
+        Submit-ErrorReport -Context 'Start der Sicherung' -Details $message -Attachments $attachments
     }
 }
 
@@ -750,6 +1214,20 @@ function Complete-Backup {
         $openLogButton.Enabled = $true
         $role = $result.Role
         Write-LauncherLog -Message "Sicherung ($role) mit Fehlercode $exitCode beendet."
+
+        if ($script:updateCapacityDisplay) {
+            &$script:updateCapacityDisplay
+        }
+
+        $attachments = @()
+        if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+            $attachments += $logPath
+        }
+        if (Test-Path -LiteralPath $script:LauncherLogPath) {
+            $attachments += $script:LauncherLogPath
+        }
+
+        Submit-ErrorReport -Context "Robocopy Fehlercode $exitCode" -Details $errorMessage -Attachments $attachments
         return
     }
 
@@ -757,6 +1235,19 @@ function Complete-Backup {
 
     Set-Status -Text "Backup erfolgreich: $target" -Color $successColor -IsRunning:$false
     $openLogButton.Enabled = $true
+
+    if ($result.TimestampMode) {
+        try {
+            $now = Get-Date
+            [System.IO.Directory]::SetCreationTime($target, $now)
+            [System.IO.Directory]::SetLastWriteTime($target, $now)
+            Write-LauncherLog -Message "Zeitstempel fuer Ordner aktualisiert: $target"
+        }
+        catch {
+            $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Aktualisieren der Zeitstempel fehlgeschlagen.'
+            Write-LauncherLog -Message "Zeitstempel des Sicherungsverzeichnisses konnten nicht aktualisiert werden: $message"
+        }
+    }
 
     try {
         $logContent = Get-Content -LiteralPath $logPath -ErrorAction Stop
@@ -770,6 +1261,34 @@ function Complete-Backup {
     }
 
     Write-LauncherLog -Message "Sicherung ($role) erfolgreich abgeschlossen (Code $exitCode)."
+
+    if ($result.TimestampMode -and $TimestampRetentionDays -gt 0) {
+        $logTextBox.AppendText("Starte Bereinigung fuer Ordner aelter als $TimestampRetentionDays Tage ...`r`n")
+        $protected = @()
+        if ($result.FolderName) {
+            $protected += $result.FolderName
+        }
+        $cleanupResult = Invoke-TimestampRetention -BasePath $result.Base -RetentionDays $TimestampRetentionDays -ProtectedNames $protected
+
+        if ($cleanupResult.Removed.Count -gt 0) {
+            foreach ($folder in $cleanupResult.Removed) {
+                $logTextBox.AppendText("Entfernt: $folder`r`n")
+            }
+        }
+        else {
+            $logTextBox.AppendText("Keine alten Ordner zum Entfernen gefunden.`r`n")
+        }
+
+        if ($cleanupResult.Failed.Count -gt 0) {
+            foreach ($item in $cleanupResult.Failed) {
+                $logTextBox.AppendText("Fehler beim Entfernen: $item`r`n")
+            }
+        }
+    }
+
+    if ($script:updateCapacityDisplay) {
+        &$script:updateCapacityDisplay
+    }
 
     if ($shutdownCheckbox.Checked) {
         Set-Status -Text ($statusLabel.Text + ' | Herunterfahren wird gestartet.') -Color $successColor -IsRunning:$false
@@ -812,12 +1331,23 @@ Write-LauncherLog -Message 'Benutzeroberflaeche wird angezeigt'
 Write-LauncherLog -Message 'Benutzeroberflaeche geschlossen'
 }
 catch {
-    Write-LauncherLog -Message ("Unbehandelter Fehler: " + $_.Exception.Message)
+    $unhandledMessage = $_.Exception.Message
+    Write-LauncherLog -Message ("Unbehandelter Fehler: " + $unhandledMessage)
+
+    $attachments = @()
+    if ($script:currentLogFile -and (Test-Path -LiteralPath $script:currentLogFile)) {
+        $attachments += $script:currentLogFile
+    }
+    if (Test-Path -LiteralPath $script:LauncherLogPath) {
+        $attachments += $script:LauncherLogPath
+    }
+
+    Submit-ErrorReport -Context 'Unerwarteter Fehler' -Details $unhandledMessage -Attachments $attachments
 
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [System.Windows.Forms.MessageBox]::Show(
-            "Es ist ein unerwarteter Fehler aufgetreten: $($_.Exception.Message)`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
+            "Es ist ein unerwarteter Fehler aufgetreten: $($unhandledMessage)`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
             $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
