@@ -64,3 +64,4 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 - Prüfen Sie regelmäßig die Log-Dateien, um sicherzustellen, dass die Sicherung erfolgreich war.
 - Bei aktivem Zeitstempelmodus zeigt der Protokollauszug zusätzlich den angeforderten Ordnernamen an; der tatsächlich angelegte Ordner nutzt eine bereinigte Variante ohne Windows-Sonderzeichen.
 - Ist `TimestampRetentionDays` größer als `0`, entfernt das Skript nach einem erfolgreichen Lauf automatisch alle älteren Zeitstempel-Ordner aus dem Zielverzeichnis und protokolliert jeden gelöschten Ordner im Fenster sowie in `launcher.log`.
+- Damit neu erzeugte Sicherungen nicht versehentlich verschwinden, orientiert sich die Bereinigung am jüngsten Zeitstempel des Ordners (Erstell- bzw. Änderungsdatum) und überspringt alle Verzeichnisse, die innerhalb des Aufbewahrungszeitraums angelegt wurden.

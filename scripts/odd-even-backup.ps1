@@ -359,10 +359,29 @@ function Invoke-TimestampRetention {
 
     try {
         $threshold = (Get-Date).AddDays(-1 * $RetentionDays)
-        $candidates = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop |
-            Where-Object { $_.LastWriteTime -lt $threshold }
+        $candidates = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop
 
-        foreach ($entry in ($candidates | Sort-Object LastWriteTime)) {
+        foreach ($entry in $candidates) {
+            $ageMarkers = @()
+
+            if ($entry.CreationTime -and $entry.CreationTime -gt [DateTime]::MinValue) {
+                $ageMarkers += $entry.CreationTime
+            }
+
+            if ($entry.LastWriteTime -and $entry.LastWriteTime -gt [DateTime]::MinValue) {
+                $ageMarkers += $entry.LastWriteTime
+            }
+
+            if ($ageMarkers.Count -eq 0) {
+                continue
+            }
+
+            $ageMarker = ($ageMarkers | Sort-Object -Descending | Select-Object -First 1)
+
+            if ($ageMarker -ge $threshold) {
+                continue
+            }
+
             try {
                 Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
                 [void]$result.Removed.Add($entry.Name)
