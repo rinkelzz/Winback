@@ -345,7 +345,8 @@ function Get-TimestampFolderInfo {
 function Invoke-TimestampRetention {
     param(
         [Parameter(Mandatory)] [string] $BasePath,
-        [Parameter(Mandatory)] [int] $RetentionDays
+        [Parameter(Mandatory)] [int] $RetentionDays,
+        [string[]] $ProtectedNames = @()
     )
 
     $result = [PSCustomObject]@{
@@ -361,7 +362,19 @@ function Invoke-TimestampRetention {
         $threshold = (Get-Date).AddDays(-1 * $RetentionDays)
         $candidates = Get-ChildItem -LiteralPath $BasePath -Directory -ErrorAction Stop
 
+        $protectedSet = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in $ProtectedNames) {
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                [void]$protectedSet.Add($name.Trim())
+            }
+        }
+
         foreach ($entry in $candidates) {
+            if ($protectedSet.Contains($entry.Name)) {
+                Write-LauncherLog -Message "Bereinigung uebersprungen fuer aktives Verzeichnis: $($entry.FullName)"
+                continue
+            }
+
             $ageMarkers = @()
 
             if ($entry.CreationTime -and $entry.CreationTime -gt [DateTime]::MinValue) {
@@ -752,6 +765,7 @@ function Start-BackupRun {
             Stamp   = $targetInfo.TimestampLabel
             Base    = $targetInfo.BasePath
             TimestampMode = $targetInfo.UsingTimestamp
+            FolderName = if ($targetInfo.UsingTimestamp) { [System.IO.Path]::GetFileName($targetRoot) } else { $null }
         }
 
         $pollTimer.Start()
@@ -827,6 +841,19 @@ function Complete-Backup {
     Set-Status -Text "Backup erfolgreich: $target" -Color $successColor -IsRunning:$false
     $openLogButton.Enabled = $true
 
+    if ($result.TimestampMode) {
+        try {
+            $now = Get-Date
+            [System.IO.Directory]::SetCreationTime($target, $now)
+            [System.IO.Directory]::SetLastWriteTime($target, $now)
+            Write-LauncherLog -Message "Zeitstempel fuer Ordner aktualisiert: $target"
+        }
+        catch {
+            $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Aktualisieren der Zeitstempel fehlgeschlagen.'
+            Write-LauncherLog -Message "Zeitstempel des Sicherungsverzeichnisses konnten nicht aktualisiert werden: $message"
+        }
+    }
+
     try {
         $logContent = Get-Content -LiteralPath $logPath -ErrorAction Stop
         $recentLines = $logContent | Select-Object -Last 200
@@ -842,7 +869,11 @@ function Complete-Backup {
 
     if ($result.TimestampMode -and $TimestampRetentionDays -gt 0) {
         $logTextBox.AppendText("Starte Bereinigung fuer Ordner aelter als $TimestampRetentionDays Tage ...`r`n")
-        $cleanupResult = Invoke-TimestampRetention -BasePath $result.Base -RetentionDays $TimestampRetentionDays
+        $protected = @()
+        if ($result.FolderName) {
+            $protected += $result.FolderName
+        }
+        $cleanupResult = Invoke-TimestampRetention -BasePath $result.Base -RetentionDays $TimestampRetentionDays -ProtectedNames $protected
 
         if ($cleanupResult.Removed.Count -gt 0) {
             foreach ($folder in $cleanupResult.Removed) {
