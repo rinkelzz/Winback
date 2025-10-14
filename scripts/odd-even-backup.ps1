@@ -124,14 +124,29 @@ Write-LauncherLog -Message 'Skriptstart'
 $script:ApplicationTitleBase = 'Backup by RinkelTech'
 $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
 
-if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
+$script:StaRelaunchMarker = '--winback-sta'
+$script:LaunchedViaStaRelaunch = $false
+
+if ($args -contains $script:StaRelaunchMarker) {
+    $script:LaunchedViaStaRelaunch = $true
+    $args = $args | Where-Object { $_ -ne $script:StaRelaunchMarker }
+}
+
+try {
+    $currentApartmentState = [System.Threading.Thread]::CurrentThread.GetApartmentState()
+}
+catch {
+    $currentApartmentState = [System.Threading.ApartmentState]::Unknown
+}
+
+if (-not $script:LaunchedViaStaRelaunch -and $currentApartmentState -ne [System.Threading.ApartmentState]::STA) {
     Write-LauncherLog -Message 'Neustart mit STA-Anforderung'
 
     try {
         $powerShellPath = (Get-Command -Name 'powershell.exe' -ErrorAction Stop).Source
         $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
             FileName         = $powerShellPath
-            Arguments        = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`""
+            Arguments        = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`" $($script:StaRelaunchMarker)"
             UseShellExecute  = $true
             WorkingDirectory = Split-Path -Parent $PSCommandPath
         }
