@@ -17,21 +17,105 @@
 
 $ErrorActionPreference = 'Stop'
 
-$script:LogRoot = Join-Path -Path ([Environment]::GetFolderPath('MyDocuments')) -ChildPath 'WinbackLogs'
-[System.IO.Directory]::CreateDirectory($script:LogRoot) | Out-Null
-$script:LauncherLogPath = Join-Path -Path $script:LogRoot -ChildPath 'launcher.log'
+$script:LogRoot = $null
+$script:LauncherLogPath = $null
+
+function Initialize-LogStorage {
+    param(
+        [switch] $Force
+    )
+
+    if (-not $Force -and $script:LogRoot -and $script:LauncherLogPath) {
+        return
+    }
+
+    $candidateParents = @()
+
+    $documentsPath = [Environment]::GetFolderPath('MyDocuments')
+    if (-not [string]::IsNullOrWhiteSpace($documentsPath)) {
+        $candidateParents += $documentsPath
+    }
+
+    $localAppDataPath = [Environment]::GetFolderPath('LocalApplicationData')
+    if (-not [string]::IsNullOrWhiteSpace($localAppDataPath)) {
+        $candidateParents += $localAppDataPath
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        $candidateParents += $PSScriptRoot
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+        $candidateParents += $env:TEMP
+    }
+
+    $lastError = $null
+    $newRoot = $null
+
+    foreach ($parent in $candidateParents | Select-Object -Unique) {
+        try {
+            $candidate = Join-Path -Path $parent -ChildPath 'WinbackLogs'
+            [System.IO.Directory]::CreateDirectory($candidate) | Out-Null
+            $newRoot = $candidate
+            break
+        }
+        catch {
+            $lastError = $_
+        }
+    }
+
+    if (-not $newRoot) {
+        $message = if ($lastError) { $lastError.Exception.Message } else { 'Unbekannter Fehler' }
+        throw "Die Protokollablage konnte nicht vorbereitet werden: $message"
+    }
+
+    $script:LogRoot = $newRoot
+    $script:LauncherLogPath = Join-Path -Path $script:LogRoot -ChildPath 'launcher.log'
+}
+
+try {
+    Initialize-LogStorage
+}
+catch {
+    $message = "Die Protokollablage konnte nicht vorbereitet werden: $($_.Exception.Message)"
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        [System.Windows.Forms.MessageBox]::Show(
+            "$message`nBitte pruefen Sie Schreibrechte auf Dokumente-, AppData- oder Temp-Ordner.",
+            'Backup by RinkelTech',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+    catch {
+        Write-Error $message
+        Start-Sleep -Seconds 8
+    }
+
+    return
+}
 
 function Write-LauncherLog {
     param(
         [Parameter(Mandatory)] [string] $Message
     )
 
+    Initialize-LogStorage
+
     try {
         $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
         Add-Content -LiteralPath $script:LauncherLogPath -Value "[$timestamp] $Message" -Encoding UTF8
     }
     catch {
-        Write-Warning "Konnte Startprotokoll nicht schreiben: $($_.Exception.Message)"
+        try {
+            Initialize-LogStorage -Force
+            $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            Add-Content -LiteralPath $script:LauncherLogPath -Value "[$timestamp] $Message" -Encoding UTF8
+        }
+        catch {
+            Write-Warning "Konnte Startprotokoll nicht schreiben: $($_.Exception.Message)"
+        }
     }
 }
 

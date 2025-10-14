@@ -14,7 +14,7 @@ Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das
    - `UseTimestampFolder` (optional): Auf `true` setzen, wenn für jedes Backup ein Unterordner erstellt werden soll.
    - `TimestampFolderFormat` (optional): Datumsformat für diese Unterordner (Standard `yyyy_MM_dd-HH:mm`). Ungültige Zeichen für Windows-Pfade (z. B. `:`) werden automatisch durch Unterstriche ersetzt.
    - `TimestampRetentionDays` (optional): Anzahl der Tage, nach denen alte Zeitstempel-Ordner automatisch gelöscht werden. `0` (Standard) deaktiviert die Bereinigung.
-   - `LogDirectory` (optional): Speicherort für die Robocopy-Protokolle. Standardmäßig werden die Dateien im Dokumente-Ordner unter `WinbackLogs` abgelegt, wo auch das Startprotokoll `launcher.log` gespeichert wird.
+  - `LogDirectory` (optional): Speicherort für die Robocopy-Protokolle. Standardmäßig legt das Skript sie im Dokumente-Ordner unter `WinbackLogs` ab. Ist dieser Pfad nicht verfügbar, wird automatisch auf `%LOCALAPPDATA%`, den Skriptordner oder – als letzte Stufe – das Temp-Verzeichnis ausgewichen. Dort finden Sie ebenfalls das Startprotokoll `launcher.log`.
    - `EmailErrorReportsEnabled` inkl. der dazugehörigen SMTP-Einstellungen (optional): Aktivieren Sie diese Option und tragen Sie Server, Absender und Anmeldedaten ein, wenn Fehlerprotokolle automatisch per E-Mail an `backup@rinkel.tech` gehen sollen.
 
 > **Hinweis:** Durch die Zuordnung über `VolumeLabel` spielt es keine Rolle mehr, welchen Laufwerksbuchstaben Windows den Festplatten zuweist.
@@ -58,7 +58,7 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 ## Weitere Hinweise
 
 - Das Skript verwendet `robocopy`, das standardmäßig unter Windows 11 vorhanden ist.
-- Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Das Startprotokoll dokumentiert Startzeit, Abschluss (inklusive Robocopy-Code) und schreibt bei unerwarteten Abbrüchen jetzt auch die vollständigen Fehlermeldungen mit.
+- Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Ohne eigenen Pfad nutzt das Skript automatisch den Dokumente-Ordner, fällt bei Bedarf aber auf `%LOCALAPPDATA%`, den Skriptordner oder das Temp-Verzeichnis zurück. Das Startprotokoll dokumentiert Startzeit, Abschluss (inklusive Robocopy-Code) und schreibt bei unerwarteten Abbrüchen jetzt auch die vollständigen Fehlermeldungen mit.
 - Wenn sich die PowerShell direkt wieder schließt, öffnen Sie `launcher.log`, um die Ursache zu sehen (z. B. fehlende USB-Festplatte oder blockierte Datei). Bei blockierten Dateien hilft `Unblock-File -Path .\odd-even-backup.ps1` in einer administrativen PowerShell.
 - Der Statusbereich und zusätzliche Hinweisdialoge geben klare Fehlermeldungen aus, z. B. wenn ein Laufwerk nicht gefunden wird oder Robocopy mit einem Fehlercode stoppt.
 - Während des Kopiervorgangs bleibt die Oberfläche aktiv und verhindert ein versehentliches Schließen. Nach Abschluss wird der Startknopf wieder freigegeben und Sie können die Logdatei direkt öffnen.
