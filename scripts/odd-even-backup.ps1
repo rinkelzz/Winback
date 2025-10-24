@@ -124,6 +124,8 @@ Write-LauncherLog -Message 'Skriptstart'
 $script:ApplicationTitleBase = 'Backup by RinkelTech'
 $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
 
+$script:LoggedLegacySources = $false
+
 $script:StaRelaunchMarker = '--winback-sta'
 $script:LaunchedViaStaRelaunch = $false
 
@@ -271,27 +273,136 @@ function Get-EffectiveBackupItems {
 
     $result = New-Object System.Collections.Generic.List[object]
 
-    if ($Items) {
-        if ($Items -is [System.Collections.IDictionary]) {
-            [void]$result.Add($Items)
+    $addBackupItem = $null
+    $addBackupItem = {
+        param(
+            [Parameter()] $Value
+        )
+
+        if ($null -eq $Value) {
+            return
         }
-        elseif ($Items -is [System.Collections.IEnumerable] -and -not ($Items -is [string])) {
-            foreach ($entry in $Items) {
-                if ($null -ne $entry) {
-                    [void]$result.Add($entry)
+
+        if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string]) -and -not ($Value -is [System.Collections.IDictionary])) {
+            foreach ($entry in $Value) {
+                & $addBackupItem -Value $entry
+            }
+            return
+        }
+
+        if ($Value -is [pscustomobject]) {
+            $copy = @{}
+            foreach ($property in $Value.PSObject.Properties) {
+                $copy[$property.Name] = $property.Value
+            }
+            & $addBackupItem -Value $copy
+            return
+        }
+
+        if ($Value -is [System.Collections.DictionaryEntry]) {
+            $sourceKey = $Value.Key
+
+            if ([string]::IsNullOrWhiteSpace([string]$sourceKey)) {
+                return
+            }
+
+            $item = @{
+                SourcePath = $sourceKey.ToString().Trim()
+            }
+
+            $entryValue = $Value.Value
+
+            if ($entryValue -is [pscustomobject] -or $entryValue -is [System.Collections.IDictionary]) {
+                $config = @{}
+
+                if ($entryValue -is [pscustomobject]) {
+                    foreach ($property in $entryValue.PSObject.Properties) {
+                        $config[$property.Name] = $property.Value
+                    }
+                }
+                else {
+                    foreach ($key in $entryValue.Keys) {
+                        $config[$key] = $entryValue[$key]
+                    }
+                }
+
+                if ($config.ContainsKey('TargetSubPath') -and -not [string]::IsNullOrWhiteSpace($config.TargetSubPath)) {
+                    $item['TargetSubPath'] = $config.TargetSubPath.ToString()
+                }
+
+                foreach ($key in $config.Keys) {
+                    if (@('SourcePath','TargetSubPath') -contains $key) {
+                        continue
+                    }
+                    $item[$key] = $config[$key]
                 }
             }
+            elseif (-not [string]::IsNullOrWhiteSpace([string]$entryValue)) {
+                $item['TargetSubPath'] = $entryValue.ToString().Trim()
+            }
+
+            [void]$result.Add($item)
+            return
         }
-        else {
-            [void]$result.Add($Items)
+
+        if ($Value -is [System.Collections.IDictionary]) {
+            if ($Value.ContainsKey('SourcePath') -and -not [string]::IsNullOrWhiteSpace($Value.SourcePath)) {
+                $copy = @{}
+                foreach ($key in $Value.Keys) {
+                    $copy[$key] = $Value[$key]
+                }
+                [void]$result.Add($copy)
+                return
+            }
+
+            foreach ($entry in $Value.GetEnumerator()) {
+                & $addBackupItem -Value $entry
+            }
+            return
+        }
+
+        if ($Value -is [System.IO.DirectoryInfo]) {
+            & $addBackupItem -Value $Value.FullName
+            return
+        }
+
+        if ($Value -is [string]) {
+            $pathText = $Value.ToString().Trim()
+
+            if (-not [string]::IsNullOrWhiteSpace($pathText)) {
+                [void]$result.Add(@{ SourcePath = $pathText })
+            }
+            return
+        }
+
+        $stringValue = $Value.ToString().Trim()
+
+        if (-not [string]::IsNullOrWhiteSpace($stringValue)) {
+            [void]$result.Add(@{ SourcePath = $stringValue })
         }
     }
 
+    & $addBackupItem -Value $Items
+
     if ($result.Count -eq 0) {
         $legacySource = Get-Variable -Name SourcePath -Scope Script -ErrorAction SilentlyContinue
+        $usedLegacyFallback = $false
 
-        if ($legacySource -and -not [string]::IsNullOrWhiteSpace($legacySource.Value)) {
-            [void]$result.Add(@{ SourcePath = $legacySource.Value })
+        if ($legacySource -and $null -ne $legacySource.Value) {
+            $usedLegacyFallback = $true
+            & $addBackupItem -Value $legacySource.Value
+        }
+
+        $legacyList = Get-Variable -Name SourcePaths -Scope Script -ErrorAction SilentlyContinue
+
+        if ($legacyList -and $null -ne $legacyList.Value) {
+            $usedLegacyFallback = $true
+            & $addBackupItem -Value $legacyList.Value
+        }
+
+        if ($usedLegacyFallback -and $result.Count -gt 0 -and -not $script:LoggedLegacySources) {
+            Write-LauncherLog -Message 'Legacy-Quellenkonfiguration erkannt (SourcePath/SourcePaths).'
+            $script:LoggedLegacySources = $true
         }
     }
 
@@ -400,7 +511,7 @@ function Resolve-BackupQueue {
             throw 'Ein Sicherungseintrag besitzt keinen gueltigen SourcePath.'
         }
 
-        $source = [Environment]::ExpandEnvironmentVariables($item.SourcePath.ToString())
+        $source = [Environment]::ExpandEnvironmentVariables($item.SourcePath.ToString().Trim())
 
         if (-not (Test-Path -LiteralPath $source)) {
             throw "Der Quellordner '$source' wurde nicht gefunden. Bitte Konfiguration pruefen."
@@ -1052,7 +1163,7 @@ function Get-TargetInfo {
         throw "Es wurde keine Zielkonfiguration fuer $roleDescription Tage gefunden."
     }
 
-    $resolved = Resolve-DriveRoot -Config $config -RoleDescription "$roleDescription"
+    $resolved = Resolve-DriveRoot -Config $config -RoleDescription $roleDescription
 
     if ($Timestamped) {
         $timestampInfo = Get-TimestampFolderInfo -Date $Date -Format $TimestampFormat
