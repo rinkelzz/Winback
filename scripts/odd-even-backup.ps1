@@ -13,9 +13,70 @@
     Requires Windows PowerShell 5.1 (ships with Windows 11) and must be executed in an STA runspace.
     Run the script without elevated rights. If the shutdown option is selected, the utility triggers
     the standard Windows shutdown procedure once the copy job succeeded.
+
+.PARAMETER DebugMode
+    Enables verbose console output (including the full error stacktrace) and keeps the console window
+    open until the user confirms with Enter whenever an unexpected error occurs. Can also be activated
+    via the WINBACK_DEBUG environment variable set to 1/true/yes.
+
+.PARAMETER DisableErrorPause
+    Suppresses the automatic console prompt on fatal errors – helpful for unattended scheduled runs.
+    The default behaviour is to keep the window open until Enter is pressed. You can also control the
+    behaviour through the WINBACK_PAUSE_ON_ERROR environment variable.
 #>
 
+param(
+    [switch] $DebugMode,
+    [switch] $DisableErrorPause
+)
+
 $ErrorActionPreference = 'Stop'
+
+$script:IsDebugMode = $false
+$script:PauseConsoleOnError = $true
+
+if ($DebugMode.IsPresent) {
+    $script:IsDebugMode = $true
+}
+else {
+    $debugEnvironment = [Environment]::GetEnvironmentVariable('WINBACK_DEBUG')
+    if (-not [string]::IsNullOrWhiteSpace($debugEnvironment)) {
+        $parsed = $false
+        if ([bool]::TryParse($debugEnvironment, [ref] $parsed)) {
+            if ($parsed) {
+                $script:IsDebugMode = $true
+            }
+        }
+        elseif ($debugEnvironment -match '^(1|true|yes)$') {
+            $script:IsDebugMode = $true
+        }
+    }
+}
+
+if ($DisableErrorPause.IsPresent) {
+    $script:PauseConsoleOnError = $false
+}
+else {
+    $pauseEnvironment = [Environment]::GetEnvironmentVariable('WINBACK_PAUSE_ON_ERROR')
+    if (-not [string]::IsNullOrWhiteSpace($pauseEnvironment)) {
+        $pauseParsed = $false
+        if ([bool]::TryParse($pauseEnvironment, [ref] $pauseParsed)) {
+            $script:PauseConsoleOnError = $pauseParsed
+        }
+        elseif ($pauseEnvironment -match '^(1|true|yes)$') {
+            $script:PauseConsoleOnError = $true
+        }
+        elseif ($pauseEnvironment -match '^(0|false|no)$') {
+            $script:PauseConsoleOnError = $false
+        }
+    }
+}
+
+if ($script:IsDebugMode) {
+    $script:PauseConsoleOnError = $true
+    $VerbosePreference = 'Continue'
+    $InformationPreference = 'Continue'
+}
 
 $script:LogRoot = $null
 $script:LauncherLogPath = $null
@@ -77,7 +138,8 @@ try {
     Initialize-LogStorage
 }
 catch {
-    $message = "Die Protokollablage konnte nicht vorbereitet werden: $($_.Exception.Message)"
+    $initError = $_
+    $message = "Die Protokollablage konnte nicht vorbereitet werden: $($initError.Exception.Message)"
 
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
@@ -89,9 +151,15 @@ catch {
         ) | Out-Null
     }
     catch {
-        Write-Error $message
-        Start-Sleep -Seconds 8
+        Write-Error "$message (Anzeige konnte nicht geoeffnet werden: $($_.Exception.Message))"
     }
+
+    $detailText = ($initError | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($detailText)) {
+        $detailText = $message
+    }
+
+    Invoke-ConsoleErrorPause -Message $message -DetailText $detailText
 
     return
 }
@@ -119,7 +187,64 @@ function Write-LauncherLog {
     }
 }
 
+function Invoke-ConsoleErrorPause {
+    param(
+        [Parameter(Mandatory)] [string] $Message,
+        [string] $DetailText
+    )
+
+    if (-not $script:PauseConsoleOnError) {
+        return
+    }
+
+    try {
+        if ($null -eq $script:ConsoleHostDetected) {
+            $shouldPrompt = $Host -and $Host.Name -eq 'ConsoleHost'
+        }
+        else {
+            $shouldPrompt = $script:ConsoleHostDetected
+        }
+
+        if (-not $shouldPrompt -and -not $script:IsDebugMode) {
+            Start-Sleep -Seconds 15
+            return
+        }
+
+        Write-Host ''
+        Write-Host $Message -ForegroundColor Red
+
+        if ($script:IsDebugMode -and -not [string]::IsNullOrWhiteSpace($DetailText)) {
+            Write-Host ''
+            Write-Host 'Debugdetails:' -ForegroundColor Yellow
+
+            foreach ($line in ($DetailText -split "`r?`n")) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    Write-Host $line
+                }
+            }
+        }
+
+        Write-Host ''
+        [void](Read-Host 'Druecken Sie Enter, um das Fenster zu schliessen')
+    }
+    catch {
+        Start-Sleep -Seconds 30
+    }
+}
+
 Write-LauncherLog -Message 'Skriptstart'
+
+$script:ConsoleHostDetected = $Host -and $Host.Name -eq 'ConsoleHost'
+
+if ($script:IsDebugMode) {
+    Write-LauncherLog -Message 'Debugmodus aktiviert'
+    if ($script:ConsoleHostDetected) {
+        Write-Host 'Debugmodus aktiviert. Erweiterte Ausgaben werden angezeigt.' -ForegroundColor Yellow
+    }
+}
+elseif (-not $script:PauseConsoleOnError) {
+    Write-LauncherLog -Message 'Fehler-Pause deaktiviert'
+}
 
 $script:ApplicationTitleBase = 'Backup by RinkelTech'
 $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
@@ -160,21 +285,30 @@ if (-not $script:LaunchedViaStaRelaunch -and $currentApartmentState -ne [System.
         }
     }
     catch {
-        Write-LauncherLog -Message "Neustart fehlgeschlagen: $($_.Exception.Message)"
+        $staError = $_
+        Write-LauncherLog -Message "Neustart fehlgeschlagen: $($staError.Exception.Message)"
+
+        $staMessage = 'Die Benutzeroberflaeche konnte nicht gestartet werden. Bitte die Datei ''{0}'' pruefen.' -f $script:LauncherLogPath
 
         try {
             Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
             [System.Windows.Forms.MessageBox]::Show(
-                "Die Benutzeroberflaeche konnte nicht gestartet werden. Bitte die Datei '$script:LauncherLogPath' pruefen.",
+                $staMessage,
                 $script:ApplicationTitle,
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Error
             ) | Out-Null
         }
         catch {
-            Write-Error "Die Benutzeroberflaeche konnte nicht gestartet werden: $($_.Exception.Message)"
-            Start-Sleep -Seconds 8
+            Write-Error "$staMessage (Anzeige konnte nicht geoeffnet werden: $($_.Exception.Message))"
         }
+
+        $staDetail = ($staError | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($staDetail)) {
+            $staDetail = $staMessage
+        }
+
+        Invoke-ConsoleErrorPause -Message $staMessage -DetailText $staDetail
     }
 
     return
@@ -1920,17 +2054,20 @@ catch {
     $reportDetails = if (-not [string]::IsNullOrWhiteSpace($detailText)) { $detailText } else { $unhandledMessage }
     Submit-ErrorReport -Context 'Unerwarteter Fehler' -Details $reportDetails -Attachments $attachments
 
+    $consoleMessage = "Es ist ein unerwarteter Fehler aufgetreten: $unhandledMessage"
+
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         [System.Windows.Forms.MessageBox]::Show(
-            "Es ist ein unerwarteter Fehler aufgetreten: $unhandledMessage`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
+            "$consoleMessage`nWeitere Details finden Sie in '$script:LauncherLogPath'.",
             $script:ApplicationTitle,
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         ) | Out-Null
     }
     catch {
-        Write-Error "Unerwarteter Fehler: $($_.Exception.Message)"
-        Start-Sleep -Seconds 8
+        Write-Error "$consoleMessage (Anzeige konnte nicht geoeffnet werden: $($_.Exception.Message))"
     }
+
+    Invoke-ConsoleErrorPause -Message $consoleMessage -DetailText $detailText
 }

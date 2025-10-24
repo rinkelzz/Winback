@@ -70,7 +70,8 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 
 - Das Skript verwendet `robocopy`, das standardmäßig unter Windows 11 vorhanden ist.
 - Die Robocopy-Protokolle sowie das Startprotokoll `launcher.log` finden Sie im Ordner, den Sie über `LogDirectory` festgelegt haben. Ohne eigenen Pfad nutzt das Skript automatisch den Dokumente-Ordner, fällt bei Bedarf aber auf `%LOCALAPPDATA%`, den Skriptordner oder das Temp-Verzeichnis zurück. Das Startprotokoll dokumentiert Startzeit, Abschluss (inklusive Robocopy-Code) und schreibt bei unerwarteten Abbrüchen jetzt auch die vollständigen Fehlermeldungen mit.
-- Wenn sich die PowerShell direkt wieder schließt, öffnen Sie `launcher.log`, um die Ursache zu sehen (z. B. fehlende USB-Festplatte oder blockierte Datei). Bei blockierten Dateien hilft `Unblock-File -Path .\odd-even-backup.ps1` in einer administrativen PowerShell.
+- Bei Fehlern bleibt das PowerShell-Fenster jetzt automatisch geöffnet, bis Sie **Enter** drücken. So können Sie die Fehlermeldung lesen, bevor sich das Fenster schließt. Zusätzlich finden Sie alle Details in `launcher.log`.
+- Aktivieren Sie bei blockierten Dateien `Unblock-File -Path .\odd-even-backup.ps1` in einer administrativen PowerShell.
 - Der Statusbereich und zusätzliche Hinweisdialoge geben klare Fehlermeldungen aus, z. B. wenn ein Laufwerk nicht gefunden wird oder Robocopy mit einem Fehlercode stoppt.
 - Während des Kopiervorgangs bleibt die Oberfläche aktiv und verhindert ein versehentliches Schließen. Nach Abschluss wird der Startknopf wieder freigegeben und Sie können die Logdatei direkt öffnen.
 - Prüfen Sie regelmäßig die Log-Dateien, um sicherzustellen, dass die Sicherung erfolgreich war.
@@ -80,6 +81,12 @@ Die Verknüpfung startet die Oberfläche, über die Sie das Backup auslösen und
 - Unter „Speicherkapazität“ sehen Sie jederzeit, wie viel Platz auf den beiden konfigurierten Laufwerken frei ist. Fehlende oder nicht verbundene Datenträger werden dort rot markiert.
 - Die Erkennung über `VolumeLabel` funktioniert komplett über die Windows-API (`System.IO.DriveInfo`) und benötigt daher keinen WMI-/CIM-Dienst mehr – das Fenster startet so auch dann zuverlässig, wenn WMI deaktiviert oder defekt ist.
 - Aktivieren Sie bei Bedarf die Fehlerbenachrichtigung per E-Mail, um Robocopy-Logs und das Launcher-Protokoll bei Problemen automatisch zu erhalten.
+
+### Debugging & erweiterte Optionen
+
+- Starten Sie das Skript mit dem Parameter `-DebugMode`, um zusätzliche Konsolenausgaben (u. a. den kompletten Fehler-Stacktrace) zu erhalten. Das Fenster bleibt dann ebenfalls geöffnet, bis Sie **Enter** drücken.
+- Alternativ können Sie vor dem Start die Umgebungsvariable `WINBACK_DEBUG` auf `1`, `true` oder `yes` setzen, um den Debugmodus zu aktivieren.
+- Die Fehler-Pause lässt sich per Parameter `-DisableErrorPause` oder durch Setzen der Umgebungsvariable `WINBACK_PAUSE_ON_ERROR` auf `0`, `false` bzw. `no` deaktivieren – z. B. für geplante Aufgaben ohne Benutzerinteraktion.
 
 ### Fehlerprotokolle automatisch versenden
 
