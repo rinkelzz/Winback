@@ -3,7 +3,7 @@
     Start a graphical backup utility that mirrors a folder to alternating USB drives and optionally shuts down afterwards.
 
 .DESCRIPTION
-    Configure the SourcePath and the two target drives below. Launching the script opens a small
+    Configure the backup sources via the BackupItems block and the two target drives below. Launching the script opens a small
     Windows Forms interface with a start button, live status messages and a checkbox that controls
     whether the computer should power off after the backup. The script chooses the appropriate
     drive depending on whether the current calendar day is odd or even, mirrors the configured
@@ -186,7 +186,9 @@ try {
 # List of backup sources. Each entry requires a SourcePath and can optionally
 # specify TargetSubPath to control the relative folder name that will be
 # created below the target location. When TargetSubPath is omitted, the script
-# uses the name of the source folder.
+# uses the name of the source folder. For compatibility with older
+# Installationen genügt weiterhin ein einzelner `SourcePath`-Wert; wenn
+# `BackupItems` leer bleibt, übernimmt das Skript diesen automatisch.
 $BackupItems = @(
     @{
         SourcePath    = "C:\\Path\\To\\Folder"
@@ -262,20 +264,66 @@ function Sanitize-PathSegment {
     return $builder.ToString()
 }
 
+function Get-EffectiveBackupItems {
+    param(
+        [Parameter()] $Items
+    )
+
+    $result = New-Object System.Collections.Generic.List[object]
+
+    if ($Items) {
+        if ($Items -is [System.Collections.IDictionary]) {
+            [void]$result.Add($Items)
+        }
+        elseif ($Items -is [System.Collections.IEnumerable] -and -not ($Items -is [string])) {
+            foreach ($entry in $Items) {
+                if ($null -ne $entry) {
+                    [void]$result.Add($entry)
+                }
+            }
+        }
+        else {
+            [void]$result.Add($Items)
+        }
+    }
+
+    if ($result.Count -eq 0) {
+        $legacySource = Get-Variable -Name SourcePath -Scope Script -ErrorAction SilentlyContinue
+
+        if ($legacySource -and -not [string]::IsNullOrWhiteSpace($legacySource.Value)) {
+            [void]$result.Add(@{ SourcePath = $legacySource.Value })
+        }
+    }
+
+    return $result.ToArray()
+}
+
 function Get-BackupItemSourceList {
     param(
-        [Parameter()] [object[]] $Items
+        [Parameter()] $Items
     )
 
     $result = New-Object System.Collections.Generic.List[string]
 
-    foreach ($item in $Items) {
-        if (-not $item) {
-            continue
-        }
+    if ($Items -is [System.Collections.IEnumerable] -and -not ($Items -is [string])) {
+        foreach ($item in $Items) {
+            if (-not $item) {
+                continue
+            }
 
-        if ($item -is [hashtable] -and $item.ContainsKey('SourcePath') -and $item.SourcePath) {
-            $result.Add($item.SourcePath.ToString())
+            $candidate = $item
+
+            if ($candidate -is [pscustomobject]) {
+                $copy = @{}
+                foreach ($property in $candidate.PSObject.Properties) {
+                    $copy[$property.Name] = $property.Value
+                }
+                $candidate = $copy
+            }
+
+            if ($candidate -is [System.Collections.IDictionary] -and $candidate.ContainsKey('SourcePath') -and $candidate.SourcePath) {
+                $result.Add($candidate.SourcePath.ToString())
+            }
         }
     }
 
@@ -284,6 +332,42 @@ function Get-BackupItemSourceList {
     }
 
     return $result
+}
+
+function Normalize-TargetConfig {
+    param(
+        [Parameter()] $Config
+    )
+
+    if (-not $Config) {
+        return $null
+    }
+
+    if ($Config -is [System.Collections.IDictionary]) {
+        $copy = @{}
+        foreach ($key in $Config.Keys) {
+            $copy[$key] = $Config[$key]
+        }
+        return $copy
+    }
+
+    if ($Config -is [pscustomobject]) {
+        $copy = @{}
+        foreach ($property in $Config.PSObject.Properties) {
+            $copy[$property.Name] = $property.Value
+        }
+        return $copy
+    }
+
+    if ($Config -is [string]) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($Config)
+
+        if (-not [string]::IsNullOrWhiteSpace($expanded)) {
+            return @{ Path = $expanded }
+        }
+    }
+
+    return $null
 }
 
 function Resolve-BackupQueue {
@@ -300,7 +384,15 @@ function Resolve-BackupQueue {
             continue
         }
 
-        if ($item -isnot [hashtable]) {
+        if ($item -is [pscustomobject]) {
+            $converted = @{}
+            foreach ($property in $item.PSObject.Properties) {
+                $converted[$property.Name] = $property.Value
+            }
+            $item = $converted
+        }
+
+        if ($item -isnot [System.Collections.IDictionary]) {
             throw 'Ein Sicherungseintrag muss als Hashtable mit SourcePath angegeben werden.'
         }
 
@@ -610,19 +702,25 @@ function Submit-ErrorReport {
 
 function Get-ConfigDescription {
     param(
-        [Parameter(Mandatory)] [hashtable] $Config
+        [Parameter()] $Config
     )
 
-    if ($Config.ContainsKey('Path') -and $Config.Path) {
-        return [Environment]::ExpandEnvironmentVariables($Config.Path)
+    $normalized = Normalize-TargetConfig -Config $Config
+
+    if (-not $normalized) {
+        return 'Nicht konfiguriert'
     }
 
-    $labelPart = if ($Config.ContainsKey('VolumeLabel') -and $Config.VolumeLabel) {
-        $Config.VolumeLabel
+    if ($normalized.ContainsKey('Path') -and $normalized.Path) {
+        return [Environment]::ExpandEnvironmentVariables($normalized.Path)
     }
 
-    $drivePart = if ($Config.ContainsKey('DriveLetter') -and $Config.DriveLetter) {
-        'Laufwerk ' + ($Config.DriveLetter.ToString().TrimEnd(':').ToUpper())
+    $labelPart = if ($normalized.ContainsKey('VolumeLabel') -and $normalized.VolumeLabel) {
+        $normalized.VolumeLabel
+    }
+
+    $drivePart = if ($normalized.ContainsKey('DriveLetter') -and $normalized.DriveLetter) {
+        'Laufwerk ' + ($normalized.DriveLetter.ToString().TrimEnd(':').ToUpper())
     }
 
     $targetPart = if ($labelPart -and $drivePart) {
@@ -635,12 +733,12 @@ function Get-ConfigDescription {
         $drivePart
     }
 
-    if ($Config.ContainsKey('RelativePath') -and $Config.RelativePath) {
+    if ($normalized.ContainsKey('RelativePath') -and $normalized.RelativePath) {
         if ($targetPart) {
-            return "$targetPart → $($Config.RelativePath)"
+            return "$targetPart → $($normalized.RelativePath)"
         }
 
-        return $Config.RelativePath
+        return $normalized.RelativePath
     }
 
     if ($targetPart) {
@@ -652,7 +750,7 @@ function Get-ConfigDescription {
 
 function Get-DriveCapacityStatus {
     param(
-        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter()] $Config,
         [Parameter(Mandatory)] [string] $RoleDescription
     )
 
@@ -661,13 +759,15 @@ function Get-DriveCapacityStatus {
         IsAvailable = $false
     }
 
-    if (-not $Config) {
+    $normalized = Normalize-TargetConfig -Config $Config
+
+    if (-not $normalized) {
         return $result
     }
 
     try {
-        if ($Config.ContainsKey('Path') -and $Config.Path) {
-            $expanded = [Environment]::ExpandEnvironmentVariables($Config.Path)
+        if ($normalized.ContainsKey('Path') -and $normalized.Path) {
+            $expanded = [Environment]::ExpandEnvironmentVariables($normalized.Path)
             $root = [System.IO.Path]::GetPathRoot($expanded)
 
             if (-not $root) {
@@ -687,11 +787,11 @@ function Get-DriveCapacityStatus {
             return $result
         }
 
-        if ($Config.ContainsKey('VolumeLabel') -and $Config.VolumeLabel) {
-            $drive = Find-DriveByVolumeLabel -Label $Config.VolumeLabel
+        if ($normalized.ContainsKey('VolumeLabel') -and $normalized.VolumeLabel) {
+            $drive = Find-DriveByVolumeLabel -Label $normalized.VolumeLabel
 
             if (-not $drive) {
-                $result.Text = "Laufwerk '$($Config.VolumeLabel)' nicht verbunden."
+                $result.Text = "Laufwerk '$($normalized.VolumeLabel)' nicht verbunden."
                 return $result
             }
 
@@ -701,8 +801,8 @@ function Get-DriveCapacityStatus {
             return $result
         }
 
-        if ($Config.ContainsKey('DriveLetter') -and $Config.DriveLetter) {
-            $letter = $Config.DriveLetter.ToString().TrimEnd(':')
+        if ($normalized.ContainsKey('DriveLetter') -and $normalized.DriveLetter) {
+            $letter = $normalized.DriveLetter.ToString().TrimEnd(':')
 
             if ([string]::IsNullOrWhiteSpace($letter)) {
                 $result.Text = "Laufwerksbuchstabe fuer $RoleDescription Tage ungueltig."
@@ -733,12 +833,18 @@ function Get-DriveCapacityStatus {
 
 function Resolve-DriveRoot {
     param(
-        [Parameter(Mandatory)] [hashtable] $Config,
+        [Parameter()] $Config,
         [Parameter(Mandatory)] [string] $RoleDescription
     )
 
-    if ($Config.ContainsKey('Path') -and $Config.Path) {
-        $expanded = [Environment]::ExpandEnvironmentVariables($Config.Path)
+    $normalized = Normalize-TargetConfig -Config $Config
+
+    if (-not $normalized) {
+        throw "Es wurde keine gueltige Zielkonfiguration fuer $RoleDescription Tage gefunden."
+    }
+
+    if ($normalized.ContainsKey('Path') -and $normalized.Path) {
+        $expanded = [Environment]::ExpandEnvironmentVariables($normalized.Path)
         $root = [System.IO.Path]::GetPathRoot($expanded)
 
         if (-not $root) {
@@ -752,15 +858,15 @@ function Resolve-DriveRoot {
         }
 
         return [PSCustomObject]@{
-            DriveRoot = $root
-            BasePath  = $expanded
-            FreeBytes = $driveInfo.AvailableFreeSpace
+            DriveRoot  = $root
+            BasePath   = $expanded
+            FreeBytes  = $driveInfo.AvailableFreeSpace
             TotalBytes = $driveInfo.TotalSize
         }
     }
 
-    if ($Config.ContainsKey('DriveLetter') -and $Config.DriveLetter) {
-        $letter = $Config.DriveLetter.ToString().TrimEnd(':')
+    if ($normalized.ContainsKey('DriveLetter') -and $normalized.DriveLetter) {
+        $letter = $normalized.DriveLetter.ToString().TrimEnd(':')
 
         if ([string]::IsNullOrWhiteSpace($letter)) {
             throw "Die Laufwerksangabe fuer $RoleDescription Tage enthaelt keinen gueltigen Buchstaben."
@@ -768,8 +874,8 @@ function Resolve-DriveRoot {
 
         $driveRoot = "{0}:\" -f $letter.ToUpper()
 
-        if ($Config.ContainsKey('RelativePath') -and $Config.RelativePath) {
-            $basePath = Join-Path -Path $driveRoot -ChildPath $Config.RelativePath
+        if ($normalized.ContainsKey('RelativePath') -and $normalized.RelativePath) {
+            $basePath = Join-Path -Path $driveRoot -ChildPath $normalized.RelativePath
         }
         else {
             $basePath = $driveRoot
@@ -782,33 +888,33 @@ function Resolve-DriveRoot {
         }
 
         return [PSCustomObject]@{
-            DriveRoot = $driveRoot
-            BasePath  = $basePath
-            FreeBytes = $driveInfo.AvailableFreeSpace
+            DriveRoot  = $driveRoot
+            BasePath   = $basePath
+            FreeBytes  = $driveInfo.AvailableFreeSpace
             TotalBytes = $driveInfo.TotalSize
         }
     }
 
-    if ($Config.ContainsKey('VolumeLabel') -and $Config.VolumeLabel) {
-        $drive = Find-DriveByVolumeLabel -Label $Config.VolumeLabel
+    if ($normalized.ContainsKey('VolumeLabel') -and $normalized.VolumeLabel) {
+        $drive = Find-DriveByVolumeLabel -Label $normalized.VolumeLabel
 
         if (-not $drive) {
-            throw "Das Laufwerk fuer $RoleDescription Tage mit dem Namen '$($Config.VolumeLabel)' wurde nicht gefunden."
+            throw "Das Laufwerk fuer $RoleDescription Tage mit dem Namen '$($normalized.VolumeLabel)' wurde nicht gefunden."
         }
 
         $driveRoot = $drive.RootDirectory.FullName
 
-        if ($Config.ContainsKey('RelativePath') -and $Config.RelativePath) {
-            $basePath = Join-Path -Path $driveRoot -ChildPath $Config.RelativePath
+        if ($normalized.ContainsKey('RelativePath') -and $normalized.RelativePath) {
+            $basePath = Join-Path -Path $driveRoot -ChildPath $normalized.RelativePath
         }
         else {
             $basePath = $driveRoot
         }
 
         return [PSCustomObject]@{
-            DriveRoot = $driveRoot
-            BasePath  = $basePath
-            FreeBytes = [long]$drive.AvailableFreeSpace
+            DriveRoot  = $driveRoot
+            BasePath   = $basePath
+            FreeBytes  = [long]$drive.AvailableFreeSpace
             TotalBytes = [long]$drive.TotalSize
         }
     }
@@ -929,15 +1035,22 @@ function Invoke-TimestampRetention {
 function Get-TargetInfo {
     param(
         [Parameter(Mandatory)] [DateTime] $Date,
-        [Parameter(Mandatory)] [hashtable] $EvenConfig,
-        [Parameter(Mandatory)] [hashtable] $OddConfig,
+        [Parameter()] $EvenConfig,
+        [Parameter()] $OddConfig,
         [bool] $Timestamped = $false,
         [string] $TimestampFormat = 'yyyy_MM_dd-HH:mm'
     )
 
+    $normalizedEven = Normalize-TargetConfig -Config $EvenConfig
+    $normalizedOdd  = Normalize-TargetConfig -Config $OddConfig
+
     $isEvenDay = ($Date.Day % 2) -eq 0
     $roleDescription = if ($isEvenDay) { 'gerade' } else { 'ungerade' }
-    $config = if ($isEvenDay) { $EvenConfig } else { $OddConfig }
+    $config = if ($isEvenDay) { $normalizedEven } else { $normalizedOdd }
+
+    if (-not $config) {
+        throw "Es wurde keine Zielkonfiguration fuer $roleDescription Tage gefunden."
+    }
 
     $resolved = Resolve-DriveRoot -Config $config -RoleDescription "$roleDescription"
 
@@ -1029,7 +1142,9 @@ $headerTitle = New-Object System.Windows.Forms.Label -Property @{
 }
 $headerPanel.Controls.Add($headerTitle)
 
-$sourcesForDisplay = Get-BackupItemSourceList -Items $BackupItems | ForEach-Object { "• $_" }
+$script:EffectiveBackupItems = Get-EffectiveBackupItems -Items $BackupItems
+
+$sourcesForDisplay = Get-BackupItemSourceList -Items $script:EffectiveBackupItems | ForEach-Object { "• $_" }
 $sourcesText = ($sourcesForDisplay -join "`r`n")
 
 $infoLabel = New-Object System.Windows.Forms.Label -Property @{
@@ -1290,6 +1405,8 @@ function Start-BackupRun {
     }
 
     try {
+        $script:EffectiveBackupItems = Get-EffectiveBackupItems -Items $BackupItems
+
         if ($script:activeBackup) {
             Write-LauncherLog -Message 'Sicherung bereits aktiv, Start ignoriert.'
             return
@@ -1312,7 +1429,7 @@ function Start-BackupRun {
         Ensure-Directory -Path $targetInfo.BasePath
         Ensure-Directory -Path $targetRoot
 
-        $queue = Resolve-BackupQueue -Items $BackupItems -TargetRoot $targetRoot
+        $queue = Resolve-BackupQueue -Items $script:EffectiveBackupItems -TargetRoot $targetRoot
 
         $logTextBox.AppendText("Ziel ($($targetInfo.RoleDescription) Tage): $targetRoot`r`n")
         if ($targetInfo.TimestampLabel) {

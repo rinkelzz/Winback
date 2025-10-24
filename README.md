@@ -6,7 +6,7 @@ Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das
 
 1. Laden Sie den Ordner `scripts` auf Ihren Windows-11-PC.
 2. Öffnen Sie `scripts/odd-even-backup.ps1` in einem Texteditor (z. B. Notepad) und passen Sie folgende Werte an:
-   - `BackupItems`: Liste der zu sichernden Ordner. Jeder Eintrag ist eine Hashtable mit `SourcePath` (Pfad des Quellordners) und optional `TargetSubPath` (Name des Unterordners auf dem Ziel). Ohne `TargetSubPath` verwendet das Skript automatisch den Ordnernamen der Quelle; ungültige Windows-Zeichen werden dabei zu Unterstrichen konvertiert.
+   - `BackupItems`: Liste der zu sichernden Ordner. Jeder Eintrag ist eine Hashtable mit `SourcePath` (Pfad des Quellordners) und optional `TargetSubPath` (Name des Unterordners auf dem Ziel). Ohne `TargetSubPath` verwendet das Skript automatisch den Ordnernamen der Quelle; ungültige Windows-Zeichen werden dabei zu Unterstrichen konvertiert. Bestehende Installationen, die bislang nur `SourcePath` gesetzt haben, funktionieren weiterhin: Solange `BackupItems` leer bleibt, übernimmt das Skript automatisch den alten Einzelpfad.
    - `EvenDayTargetConfig` und `OddDayTargetConfig`: Hier beschreiben Sie die beiden USB-Festplatten.
      - Geben Sie idealerweise `VolumeLabel` (z. B. `Festplatte A`) sowie `RelativePath` (z. B. `Backups`) an. Damit findet das Skript die Festplatte anhand ihres Namens, egal welchen Laufwerksbuchstaben Windows vergibt.
      - Alternativ können Sie ein festes `Path` setzen (z. B. `E:\Backups`). Optional lässt sich `DriveLetter` ergänzen, um Name und Buchstaben gemeinsam anzuzeigen.
