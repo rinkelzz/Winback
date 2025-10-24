@@ -15,6 +15,16 @@
     the standard Windows shutdown procedure once the copy job succeeded.
 #>
 
+[CmdletBinding()]
+param(
+    [switch] $DebugMode,
+    [switch] $DisableErrorPause
+)
+
+if ($DebugMode.IsPresent) {
+    $DebugPreference = 'Continue'
+}
+
 $ErrorActionPreference = 'Stop'
 
 $script:LogRoot = $null
@@ -90,7 +100,9 @@ catch {
     }
     catch {
         Write-Error $message
-        Start-Sleep -Seconds 8
+        if (-not $DisableErrorPause.IsPresent) {
+            Start-Sleep -Seconds 8
+        }
     }
 
     return
@@ -119,17 +131,79 @@ function Write-LauncherLog {
     }
 }
 
+function Join-CommandLineArguments {
+    param(
+        [Parameter(Mandatory)] [object[]] $Arguments
+    )
+
+    $pieces = foreach ($argument in $Arguments) {
+        if ($null -eq $argument) {
+            continue
+        }
+
+        $text = [string]$argument
+
+        if ($text.Length -eq 0) {
+            "\"\""
+            continue
+        }
+        if ($text -notmatch '[\s"]') {
+            $text
+            continue
+        }
+
+        $escaped = $text -replace '(\\*)"', '${1}${1}\"'
+        $escaped = $escaped -replace '(\\+)$', '${1}${1}'
+        "\"$escaped\""
+    }
+
+    return ($pieces -join ' ')
+}
+
 Write-LauncherLog -Message 'Skriptstart'
+
+if ($DebugMode.IsPresent) {
+    Write-LauncherLog -Message 'Debugmodus aktiviert'
+    Write-Debug 'Debugmodus aktiviert – Debug-Ausgaben werden angezeigt.'
+}
+
+if ($DisableErrorPause.IsPresent) {
+    Write-LauncherLog -Message 'Fehlerpause deaktiviert'
+    Write-Debug 'Fehlerpausen werden deaktiviert.'
+}
 
 $script:ApplicationTitleBase = 'Backup by RinkelTech'
 $script:ApplicationTitle = "$($script:ApplicationTitleBase) license for"
 
 $script:StaRelaunchMarker = '--winback-sta'
 $script:LaunchedViaStaRelaunch = $false
+$script:PreservedArguments = @()
 
 if ($args -contains $script:StaRelaunchMarker) {
     $script:LaunchedViaStaRelaunch = $true
-    $args = $args | Where-Object { $_ -ne $script:StaRelaunchMarker }
+}
+
+$effectiveArguments = @($args | Where-Object { $_ -ne $script:StaRelaunchMarker })
+
+if ($DebugMode.IsPresent -and -not ($effectiveArguments -contains '-DebugMode')) {
+    $effectiveArguments += '-DebugMode'
+}
+
+if ($DisableErrorPause.IsPresent -and -not ($effectiveArguments -contains '-DisableErrorPause')) {
+    $effectiveArguments += '-DisableErrorPause'
+}
+
+$script:PreservedArguments = $effectiveArguments
+
+if ($script:LaunchedViaStaRelaunch) {
+    $args = $effectiveArguments
+}
+
+if ($script:PreservedArguments.Count -gt 0) {
+    Write-Debug ("Gespeicherte Argumente fuer STA-Neustart: " + ($script:PreservedArguments -join ', '))
+}
+else {
+    Write-Debug 'Keine zusaetzlichen Argumente fuer STA-Neustart vorhanden.'
 }
 
 try {
@@ -142,11 +216,29 @@ catch {
 if (-not $script:LaunchedViaStaRelaunch -and $currentApartmentState -ne [System.Threading.ApartmentState]::STA) {
     Write-LauncherLog -Message 'Neustart mit STA-Anforderung'
 
+    if ($script:PreservedArguments.Count -gt 0) {
+        Write-LauncherLog -Message ("Argumente fuer STA-Neustart: " + ($script:PreservedArguments -join ' '))
+    }
+
     try {
         $powerShellPath = (Get-Command -Name 'powershell.exe' -ErrorAction Stop).Source
+        $argumentList = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-STA',
+            '-File', $PSCommandPath,
+            $script:StaRelaunchMarker
+        )
+
+        if ($script:PreservedArguments.Count -gt 0) {
+            $argumentList += $script:PreservedArguments
+        }
+
+        $argumentString = Join-CommandLineArguments -Arguments $argumentList
+        Write-Debug ("STA-Neustart-Aufruf: powershell.exe " + $argumentString)
         $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
             FileName         = $powerShellPath
-            Arguments        = "-NoProfile -ExecutionPolicy Bypass -STA -File `"$PSCommandPath`" $($script:StaRelaunchMarker)"
+            Arguments        = $argumentString
             UseShellExecute  = $true
             WorkingDirectory = Split-Path -Parent $PSCommandPath
         }
@@ -171,7 +263,9 @@ if (-not $script:LaunchedViaStaRelaunch -and $currentApartmentState -ne [System.
         }
         catch {
             Write-Error "Die Benutzeroberflaeche konnte nicht gestartet werden: $($_.Exception.Message)"
-            Start-Sleep -Seconds 8
+            if (-not $DisableErrorPause.IsPresent) {
+                Start-Sleep -Seconds 8
+            }
         }
     }
 
@@ -1477,6 +1571,8 @@ catch {
     }
     catch {
         Write-Error "Unerwarteter Fehler: $($_.Exception.Message)"
-        Start-Sleep -Seconds 8
+        if (-not $DisableErrorPause.IsPresent) {
+            Start-Sleep -Seconds 8
+        }
     }
 }
