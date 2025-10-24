@@ -1,12 +1,12 @@
 # Backup by RinkelTech
 
-Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das ein bestimmtes Verzeichnis auf zwei USB-Festplatten sichert. An geraden Kalendertagen wird auf die erste Festplatte kopiert, an ungeraden Tagen auf die zweite. Nach erfolgreichem Backup kann der PC automatisch heruntergefahren werden.
+Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das beliebig viele Verzeichnisse auf zwei USB-Festplatten sichert. An geraden Kalendertagen wird auf die erste Festplatte kopiert, an ungeraden Tagen auf die zweite. Nach erfolgreichem Backup kann der PC automatisch heruntergefahren werden.
 
 ## Installation
 
 1. Laden Sie den Ordner `scripts` auf Ihren Windows-11-PC.
 2. Öffnen Sie `scripts/odd-even-backup.ps1` in einem Texteditor (z. B. Notepad) und passen Sie folgende Werte an:
-   - `SourcePath`: Pfad des Ordners, der gesichert werden soll.
+   - `BackupItems`: Liste der zu sichernden Ordner. Jeder Eintrag ist eine Hashtable mit `SourcePath` (Pfad des Quellordners) und optional `TargetSubPath` (Name des Unterordners auf dem Ziel). Ohne `TargetSubPath` verwendet das Skript automatisch den Ordnernamen der Quelle; ungültige Windows-Zeichen werden dabei zu Unterstrichen konvertiert.
    - `EvenDayTargetConfig` und `OddDayTargetConfig`: Hier beschreiben Sie die beiden USB-Festplatten.
      - Geben Sie idealerweise `VolumeLabel` (z. B. `Festplatte A`) sowie `RelativePath` (z. B. `Backups`) an. Damit findet das Skript die Festplatte anhand ihres Namens, egal welchen Laufwerksbuchstaben Windows vergibt.
      - Alternativ können Sie ein festes `Path` setzen (z. B. `E:\Backups`). Optional lässt sich `DriveLetter` ergänzen, um Name und Buchstaben gemeinsam anzuzeigen.
@@ -22,6 +22,17 @@ Dieses Repository enthält ein PowerShell-Skript mit grafischer Oberfläche, das
 Ein typischer Konfigurationsblock sieht z. B. so aus:
 
 ```powershell
+$BackupItems = @(
+    @{
+        SourcePath    = 'C:\\Daten\\Projekte'
+        TargetSubPath = 'Projekte'
+    },
+    @{
+        SourcePath = 'D:\\Fotos'
+        # Ohne TargetSubPath wird automatisch der Ordnername "Fotos" verwendet.
+    }
+)
+
 $EvenDayTargetConfig = @{
     VolumeLabel  = 'Festplatte A'
     RelativePath = 'Backups'
@@ -37,7 +48,7 @@ $OddDayTargetConfig = @{
 
 1. Verbinden Sie mindestens die USB-Festplatte, die dem aktuellen Kalendertag zugeordnet ist. Ist nur eine der beiden angeschlossen, startet die Sicherung trotzdem – das Skript überprüft anhand des eingestellten Datenträgers (Volume-Label/Laufwerksbuchstabe), ob wirklich das richtige Ziel gefunden wurde.
 2. Klicken Sie mit der rechten Maustaste auf die Datei `odd-even-backup.ps1` und wählen Sie **Mit PowerShell ausführen**. Das Skript startet automatisch im benötigten STA-Modus.
-3. Die Oberfläche zeigt Quelle, tagesabhängiges Ziel, die freien Speicherkapazitäten der beiden Laufwerke sowie einen farblich hervorgehobenen Statusbereich an. Der Fenstertitel lautet „Backup by RinkelTech license for …“ und ergänzt – sofern konfiguriert – automatisch Ihren Firmennamen. Starten Sie die Sicherung über **Backup starten** – während des Kopiervorgangs läuft ein dezenter Fortschrittsbalken, und im Protokollauszug erscheinen der Logpfad sowie die letzten Zeilen der Robocopy-Datei.
+3. Die Oberfläche zeigt alle Quellen, das tagesabhängige Ziel, die freien Speicherkapazitäten der beiden Laufwerke sowie einen farblich hervorgehobenen Statusbereich an. Der Fenstertitel lautet „Backup by RinkelTech license for …“ und ergänzt – sofern konfiguriert – automatisch Ihren Firmennamen. Starten Sie die Sicherung über **Backup starten** – während des Kopiervorgangs läuft ein dezenter Fortschrittsbalken, und im Protokollauszug erscheinen der Logpfad, die abgearbeiteten Quellen sowie die letzten Zeilen der Robocopy-Datei.
 4. Aktivieren Sie optional die Checkbox **Nach erfolgreichem Backup herunterfahren**, um den PC direkt nach erfolgreichem Kopiervorgang herunterzufahren.
 5. Über **Logdatei öffnen** lässt sich der vollständige Robocopy-Log anschließend in Notepad ansehen.
 

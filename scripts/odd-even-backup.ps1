@@ -183,8 +183,16 @@ Write-LauncherLog -Message 'STA-Laufzeit aktiv'
 try {
 
 #region --- User configuration -------------------------------------------------
-# Path to the folder you want to back up.
-$SourcePath = "C:\\Path\\To\\Folder"
+# List of backup sources. Each entry requires a SourcePath and can optionally
+# specify TargetSubPath to control the relative folder name that will be
+# created below the target location. When TargetSubPath is omitted, the script
+# uses the name of the source folder.
+$BackupItems = @(
+    @{
+        SourcePath    = "C:\\Path\\To\\Folder"
+        TargetSubPath = 'Folder'
+    }
+)
 
 # Target locations for even and odd days. Configure either a fixed Path, or
 # describe the USB drive via VolumeLabel and optional DriveLetter together with
@@ -229,6 +237,116 @@ $EmailSubjectPrefix      = 'Backup Fehler'
 $EmailSmtpUsername       = ''
 $EmailSmtpPassword       = ''
 #endregion ---------------------------------------------------------------------
+
+function Sanitize-PathSegment {
+    param(
+        [Parameter(Mandatory)] [string] $Value
+    )
+
+    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
+    $builder = New-Object System.Text.StringBuilder
+
+    foreach ($char in $Value.ToCharArray()) {
+        if ($invalidChars -contains $char) {
+            [void]$builder.Append('_')
+        }
+        else {
+            [void]$builder.Append($char)
+        }
+    }
+
+    if ($builder.Length -eq 0) {
+        return 'Backup'
+    }
+
+    return $builder.ToString()
+}
+
+function Get-BackupItemSourceList {
+    param(
+        [Parameter()] [object[]] $Items
+    )
+
+    $result = New-Object System.Collections.Generic.List[string]
+
+    foreach ($item in $Items) {
+        if (-not $item) {
+            continue
+        }
+
+        if ($item -is [hashtable] -and $item.ContainsKey('SourcePath') -and $item.SourcePath) {
+            $result.Add($item.SourcePath.ToString())
+        }
+    }
+
+    if ($result.Count -eq 0) {
+        $result.Add('Keine Quellen konfiguriert.')
+    }
+
+    return $result
+}
+
+function Resolve-BackupQueue {
+    param(
+        [Parameter(Mandatory)] [object[]] $Items,
+        [Parameter(Mandatory)] [string] $TargetRoot
+    )
+
+    $queue = New-Object System.Collections.Generic.List[object]
+    $index = 0
+
+    foreach ($item in $Items) {
+        if (-not $item) {
+            continue
+        }
+
+        if ($item -isnot [hashtable]) {
+            throw 'Ein Sicherungseintrag muss als Hashtable mit SourcePath angegeben werden.'
+        }
+
+        if (-not $item.ContainsKey('SourcePath') -or [string]::IsNullOrWhiteSpace($item.SourcePath)) {
+            throw 'Ein Sicherungseintrag besitzt keinen gueltigen SourcePath.'
+        }
+
+        $source = [Environment]::ExpandEnvironmentVariables($item.SourcePath.ToString())
+
+        if (-not (Test-Path -LiteralPath $source)) {
+            throw "Der Quellordner '$source' wurde nicht gefunden. Bitte Konfiguration pruefen."
+        }
+
+        $targetSegment = $null
+
+        if ($item.ContainsKey('TargetSubPath') -and -not [string]::IsNullOrWhiteSpace($item.TargetSubPath)) {
+            $targetSegment = Sanitize-PathSegment -Value $item.TargetSubPath.ToString()
+        }
+        else {
+            $leaf = Split-Path -Path $source -Leaf
+
+            if ([string]::IsNullOrWhiteSpace($leaf)) {
+                throw "Fuer die Quelle '$source' muss TargetSubPath gesetzt werden."
+            }
+
+            $targetSegment = Sanitize-PathSegment -Value $leaf
+        }
+
+        $destination = Join-Path -Path $TargetRoot -ChildPath $targetSegment
+
+        $queue.Add([PSCustomObject]@{
+            SourcePath      = $source
+            DestinationPath = $destination
+            DisplayName     = $targetSegment
+            Index           = $index
+        })
+
+        $index++
+    }
+
+    if ($queue.Count -eq 0) {
+        throw 'Es wurde kein gueltiger Sicherungseintrag konfiguriert.'
+    }
+
+    return $queue
+}
 
 $companyNameForTitle = if ($null -ne $LicenseCompanyName) { $LicenseCompanyName.Trim() } else { '' }
 if ([string]::IsNullOrWhiteSpace($companyNameForTitle)) {
@@ -911,12 +1029,15 @@ $headerTitle = New-Object System.Windows.Forms.Label -Property @{
 }
 $headerPanel.Controls.Add($headerTitle)
 
+$sourcesForDisplay = Get-BackupItemSourceList -Items $BackupItems | ForEach-Object { "• $_" }
+$sourcesText = ($sourcesForDisplay -join "`r`n")
+
 $infoLabel = New-Object System.Windows.Forms.Label -Property @{
     AutoSize     = $true
     Dock         = 'Top'
     MaximumSize  = New-Object System.Drawing.Size(520, 0)
     Padding      = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
-    Text         = "Quelle: $SourcePath`r`nGerade Tage: $evenDescription`r`nUngerade Tage: $oddDescription"
+    Text         = "Quellen:`r`n$sourcesText`r`n`r`nGerade Tage: $evenDescription`r`nUngerade Tage: $oddDescription"
     ForeColor    = $neutralColor
 }
 $headerPanel.Controls.Add($infoLabel)
@@ -1176,10 +1297,6 @@ function Start-BackupRun {
 
         Set-Status -Text 'Pruefe Pfade und Laufwerke ...' -Color $accentColor -IsRunning $true
 
-        if (-not (Test-Path -LiteralPath $SourcePath)) {
-            throw "Der Quellordner '$SourcePath' wurde nicht gefunden. Bitte Konfiguration pruefen."
-        }
-
         $today      = Get-Date
         $targetInfo = Get-TargetInfo -Date $today -EvenConfig $EvenDayTargetConfig -OddConfig $OddDayTargetConfig -Timestamped:$UseTimestampFolder -TimestampFormat $TimestampFolderFormat
 
@@ -1191,6 +1308,12 @@ function Start-BackupRun {
         $logFileName = "backup-" + $today.ToString('yyyy-MM-dd_HHmmss') + '.log'
         $logFile     = Join-Path -Path $LogDirectory -ChildPath $logFileName
 
+        Ensure-Directory -Path (Split-Path -Parent $logFile)
+        Ensure-Directory -Path $targetInfo.BasePath
+        Ensure-Directory -Path $targetRoot
+
+        $queue = Resolve-BackupQueue -Items $BackupItems -TargetRoot $targetRoot
+
         $logTextBox.AppendText("Ziel ($($targetInfo.RoleDescription) Tage): $targetRoot`r`n")
         if ($targetInfo.TimestampLabel) {
             $logTextBox.AppendText("Zeitstempel: $($targetInfo.TimestampLabel)`r`n")
@@ -1198,58 +1321,36 @@ function Start-BackupRun {
         if ($null -ne $targetInfo.DriveFreeBytes -and $null -ne $targetInfo.DriveTotalBytes) {
             $logTextBox.AppendText("Freier Speicher: " + (Format-ByteSize $targetInfo.DriveFreeBytes) + ' von ' + (Format-ByteSize $targetInfo.DriveTotalBytes) + "`r`n")
         }
-        $logTextBox.AppendText("Robocopy-Protokoll: $logFile`r`n`r`n")
+        $logTextBox.AppendText("Robocopy-Protokoll: $logFile`r`n")
+        $logTextBox.AppendText("Sicherungsquellen:`r`n")
+        foreach ($task in $queue) {
+            $logTextBox.AppendText("  [$([int]$task.Index + 1)] $($task.SourcePath) → $($task.DestinationPath)`r`n")
+        }
+        $logTextBox.AppendText("`r`n")
 
         $startButton.Enabled = $false
         $closeButton.Enabled = $false
 
-        Write-LauncherLog -Message "Sicherung gestartet ($($targetInfo.RoleDescription) Tage) → $targetRoot"
+        Write-LauncherLog -Message "Sicherung gestartet ($($targetInfo.RoleDescription) Tage) → $targetRoot ($($queue.Count) Quellen)"
         Set-Status -Text "Sicherung laeuft auf $targetRoot ..." -Color $accentColor -IsRunning $true
 
-        Ensure-Directory -Path (Split-Path -Parent $logFile)
-        Ensure-Directory -Path $targetInfo.BasePath
-        Ensure-Directory -Path $targetRoot
-
-        $robocopyArgs = @(
-            '"' + $SourcePath + '"',
-            '"' + $targetRoot + '"',
-            '/MIR',
-            '/R:3',
-            '/W:5',
-            '/MT:16',
-            '/COPY:DAT',
-            '/DCOPY:T',
-            '/V',
-            '/NP',
-            '/LOG:"' + $logFile + '"'
-        )
-
-        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-        $startInfo.FileName = 'robocopy.exe'
-        $startInfo.Arguments = $robocopyArgs -join ' '
-        $startInfo.UseShellExecute = $false
-        $startInfo.CreateNoWindow = $true
-
-        $process = New-Object System.Diagnostics.Process
-        $process.StartInfo = $startInfo
-
-        if (-not $process.Start()) {
-            throw 'Robocopy konnte nicht gestartet werden.'
-        }
-
         $script:activeBackup = [PSCustomObject]@{
-            Process = $process
-            LogPath = $logFile
-            Target  = $targetRoot
-            Role    = $targetInfo.RoleDescription
-            Stamp   = $targetInfo.TimestampLabel
-            Base    = $targetInfo.BasePath
+            Process       = $null
+            LogPath       = $logFile
+            Target        = $targetRoot
+            Role          = $targetInfo.RoleDescription
+            Stamp         = $targetInfo.TimestampLabel
+            Base          = $targetInfo.BasePath
             TimestampMode = $targetInfo.UsingTimestamp
-            FolderName = if ($targetInfo.UsingTimestamp) { [System.IO.Path]::GetFileName($targetRoot) } else { $null }
+            FolderName    = if ($targetInfo.UsingTimestamp) { [System.IO.Path]::GetFileName($targetRoot) } else { $null }
+            Queue         = $queue
+            CurrentIndex  = -1
+            CurrentTask   = $null
         }
 
-        $pollTimer.Start()
         $script:currentLogFile = $logFile
+
+        Start-NextBackupTask
     }
     catch {
         $pollTimer.Stop()
@@ -1277,6 +1378,71 @@ function Start-BackupRun {
     }
 }
 
+function Start-NextBackupTask {
+    if (-not $script:activeBackup) {
+        return
+    }
+
+    $queue = $script:activeBackup.Queue
+
+    if (-not $queue -or $queue.Count -eq 0) {
+        Finalize-BackupRun -Success $true -ExitCode 0
+        return
+    }
+
+    $nextIndex = $script:activeBackup.CurrentIndex + 1
+
+    if ($nextIndex -ge $queue.Count) {
+        Finalize-BackupRun -Success $true -ExitCode 0
+        return
+    }
+
+    $task = $queue[$nextIndex]
+    $script:activeBackup.CurrentIndex = $nextIndex
+    $script:activeBackup.CurrentTask = $task
+
+    $logPath = $script:activeBackup.LogPath
+    $target  = $script:activeBackup.Target
+
+    $logSwitch = if ($nextIndex -eq 0) { '/LOG:"' + $logPath + '"' } else { '/LOG+:"' + $logPath + '"' }
+
+    $robocopyArgs = @(
+        '"' + $task.SourcePath + '"',
+        '"' + $task.DestinationPath + '"',
+        '/MIR',
+        '/R:3',
+        '/W:5',
+        '/MT:16',
+        '/COPY:DAT',
+        '/DCOPY:T',
+        '/V',
+        '/NP',
+        $logSwitch
+    )
+
+    $logTextBox.AppendText("Starte Sicherung [$($nextIndex + 1)/$($queue.Count)]: $($task.SourcePath) → $($task.DestinationPath)`r`n")
+    Write-LauncherLog -Message "Robocopy gestartet (#$($nextIndex + 1)): $($task.SourcePath) → $($task.DestinationPath)"
+
+    Ensure-Directory -Path $task.DestinationPath
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'robocopy.exe'
+    $startInfo.Arguments = $robocopyArgs -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+
+    if (-not $process.Start()) {
+        throw 'Robocopy konnte nicht gestartet werden.'
+    }
+
+    $script:activeBackup.Process = $process
+    Set-Status -Text "Sicherung laeuft auf $target – $($task.DisplayName)" -Color $accentColor -IsRunning $true
+    $pollTimer.Start()
+}
+
 function Complete-Backup {
     if (-not $script:activeBackup) {
         return
@@ -1285,6 +1451,10 @@ function Complete-Backup {
     $pollTimer.Stop()
 
     $process = $script:activeBackup.Process
+
+    if (-not $process) {
+        return
+    }
 
     try {
         $process.WaitForExit()
@@ -1304,6 +1474,49 @@ function Complete-Backup {
         $process.Dispose()
     }
 
+    $task   = $script:activeBackup.CurrentTask
+    $index  = $script:activeBackup.CurrentIndex
+    $queue  = $script:activeBackup.Queue
+    $total  = if ($queue) { $queue.Count } else { 0 }
+
+    $script:activeBackup.Process = $null
+    $script:activeBackup.CurrentTask = $null
+
+    $logTextBox.AppendText("Beendet [$($index + 1)/$total] – Robocopy-Code: $exitCode`r`n")
+    Write-LauncherLog -Message "Robocopy beendet (#$($index + 1)) mit Code $exitCode"
+
+    if ($exitCode -gt 7) {
+        $details = if ($task) { "Robocopy meldet Fehler (Code $exitCode) bei '$($task.SourcePath)' → '$($task.DestinationPath)'." } else { "Robocopy meldet Fehler (Code $exitCode)." }
+        Finalize-BackupRun -Success $false -ErrorMessage $details -ExitCode $exitCode -FailedTask $task
+        return
+    }
+
+    if ($total -gt 0 -and $index -lt ($total - 1)) {
+        try {
+            Start-NextBackupTask
+        }
+        catch {
+            $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Die Sicherung konnte nicht fortgesetzt werden.'
+            Finalize-BackupRun -Success $false -ErrorMessage $message -ExitCode 16 -FailedTask $task
+        }
+        return
+    }
+
+    Finalize-BackupRun -Success $true -ExitCode $exitCode
+}
+
+function Finalize-BackupRun {
+    param(
+        [Parameter(Mandatory)] [bool] $Success,
+        [string] $ErrorMessage,
+        [int] $ExitCode = 0,
+        $FailedTask = $null
+    )
+
+    if (-not $script:activeBackup) {
+        return
+    }
+
     $result = $script:activeBackup
     $script:activeBackup = $null
 
@@ -1314,40 +1527,64 @@ function Complete-Backup {
     $target  = $result.Target
 
     $script:currentLogFile = $logPath
-    $logTextBox.AppendText("Logdatei: $logPath`r`n")
+
     if ($result.Stamp) {
         $logTextBox.AppendText("Zeitstempel: $($result.Stamp)`r`n")
     }
 
-    if ($exitCode -gt 7) {
-        Set-Status -Text 'Backup mit Fehler beendet. Log pruefen.' -Color $errorColor -IsRunning:$false
-        $errorMessage = "Robocopy meldet Fehler (Code $exitCode). Bitte Log ansehen."
-        Show-ErrorDialog -Message $errorMessage
-        $logTextBox.AppendText($errorMessage + "`r`n")
+    if ($logPath) {
+        $logTextBox.AppendText("Logdatei: $logPath`r`n")
+    }
+
+    $hasLog = $false
+    if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+        $hasLog = $true
         $openLogButton.Enabled = $true
+        try {
+            $logContent = Get-Content -LiteralPath $logPath -ErrorAction Stop
+            $recentLines = $logContent | Select-Object -Last 200
+            $logTextBox.AppendText(($recentLines -join [Environment]::NewLine) + [Environment]::NewLine)
+        }
+        catch {
+            $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Log konnte nicht geladen werden.'
+            $logTextBox.AppendText("$message`r`n")
+            Write-LauncherLog -Message "Lesen des Logs fehlgeschlagen: $message"
+        }
+    }
+    else {
+        $openLogButton.Enabled = $false
+    }
+
+    if (-not $Success) {
+        $displayMessage = if ([string]::IsNullOrWhiteSpace($ErrorMessage)) { "Robocopy meldet Fehler (Code $ExitCode). Bitte Log ansehen." } else { $ErrorMessage }
+        Set-Status -Text 'Backup mit Fehler beendet. Log pruefen.' -Color $errorColor -IsRunning:$false
+        Show-ErrorDialog -Message $displayMessage
+        $logTextBox.AppendText($displayMessage + "`r`n")
+
         $role = $result.Role
-        Write-LauncherLog -Message "Sicherung ($role) mit Fehlercode $exitCode beendet."
+        Write-LauncherLog -Message "Sicherung ($role) mit Fehlercode $ExitCode beendet."
 
         if ($script:updateCapacityDisplay) {
             &$script:updateCapacityDisplay
         }
 
         $attachments = @()
-        if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+        if ($hasLog) {
             $attachments += $logPath
         }
         if (Test-Path -LiteralPath $script:LauncherLogPath) {
             $attachments += $script:LauncherLogPath
         }
 
-        Submit-ErrorReport -Context "Robocopy Fehlercode $exitCode" -Details $errorMessage -Attachments $attachments
+        $context = if ($FailedTask) { "Robocopy Fehlercode $ExitCode (" + $FailedTask.DisplayName + ')'} else { "Robocopy Fehlercode $ExitCode" }
+        Submit-ErrorReport -Context $context -Details $displayMessage -Attachments $attachments
+
         return
     }
 
     $role = $result.Role
 
     Set-Status -Text "Backup erfolgreich: $target" -Color $successColor -IsRunning:$false
-    $openLogButton.Enabled = $true
 
     if ($result.TimestampMode) {
         try {
@@ -1362,18 +1599,7 @@ function Complete-Backup {
         }
     }
 
-    try {
-        $logContent = Get-Content -LiteralPath $logPath -ErrorAction Stop
-        $recentLines = $logContent | Select-Object -Last 200
-        $logTextBox.AppendText(($recentLines -join [Environment]::NewLine) + [Environment]::NewLine)
-    }
-    catch {
-        $message = Get-FriendlyErrorMessage -ErrorObject $_ -Fallback 'Log konnte nicht geladen werden.'
-        $logTextBox.AppendText("$message`r`n")
-        Write-LauncherLog -Message "Lesen des Logs fehlgeschlagen: $message"
-    }
-
-    Write-LauncherLog -Message "Sicherung ($role) erfolgreich abgeschlossen (Code $exitCode)."
+    Write-LauncherLog -Message "Sicherung ($role) erfolgreich abgeschlossen (Code $ExitCode)."
 
     if ($result.TimestampMode -and $TimestampRetentionDays -gt 0) {
         $logTextBox.AppendText("Starte Bereinigung fuer Ordner aelter als $TimestampRetentionDays Tage ...`r`n")
